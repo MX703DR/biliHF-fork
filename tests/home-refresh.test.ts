@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createHomeRefreshHandler } from '../src/home-refresh';
+import { beginHomeRefreshScrollGuard, createHomeRefreshHandler, withoutHomeRefreshScroll } from '../src/home-refresh';
 function harness() {
   const button = { disabled: false };
   let enabled = true, home = true, loading = false, now = 0;
@@ -21,6 +21,57 @@ describe('首页换一换：复用原生完整刷新', () => {
   it('找不到原生完整刷新入口，安全降级为整页刷新而不是只改 DOM', () => { const h = harness(); h.noRefresh(); h.click(); expect(h.reload).toHaveBeenCalledOnce(); });
   it('异常和超长加载不会把按钮永久锁死', () => {
     const h = harness(); h.click(); h.loading(true); h.advance(20000); expect(h.button.disabled).toBe(false);
+  });
+});
+
+describe('首页刷新只屏蔽原生分发中的自动滚动', () => {
+  it('屏蔽原生两次回顶部和同步 scroll/scrollBy，分发后手动滚动仍有效', () => {
+    const host = { scrollTo: vi.fn(), scroll: vi.fn(), scrollBy: vi.fn() };
+    const before = Object.getOwnPropertyDescriptors(host);
+    withoutHomeRefreshScroll(host, () => { host.scrollTo(0, 0); host.scrollTo(0, 0); host.scroll(0, 300); host.scrollBy(0, 300); });
+    expect(host.scrollTo).not.toHaveBeenCalled(); expect(host.scroll).not.toHaveBeenCalled(); expect(host.scrollBy).not.toHaveBeenCalled();
+    expect(Object.getOwnPropertyDescriptors(host)).toEqual(before);
+    host.scrollTo(0, 0); expect(host.scrollTo).toHaveBeenCalledOnce();
+  });
+  it('原生刷新抛错时也恢复方法，包括继承方法与可配置 getter', () => {
+    const original = vi.fn(); const host = Object.create({ scroll: original, scrollBy: original });
+    Object.defineProperty(host, 'scrollTo', { configurable: true, get: () => original });
+    const descriptor = Object.getOwnPropertyDescriptor(host, 'scrollTo');
+    expect(() => withoutHomeRefreshScroll(host, () => { throw new Error('refresh failed'); })).toThrow('refresh failed');
+    expect(Object.getOwnPropertyDescriptor(host, 'scrollTo')).toEqual(descriptor);
+    expect(Object.prototype.hasOwnProperty.call(host, 'scroll')).toBe(false); expect(Object.prototype.hasOwnProperty.call(host, 'scrollBy')).toBe(false);
+  });
+  it('不强行改只读 API，也不覆盖同步回调中其他扩展的新实现', () => {
+    const readonly = vi.fn(), next = vi.fn(); const host = { scroll: vi.fn(), scrollBy: vi.fn() } as any;
+    Object.defineProperty(host, 'scrollTo', { value: readonly, writable: false, configurable: false });
+    withoutHomeRefreshScroll(host, () => { host.scrollTo(0, 0); host.scroll = next; });
+    expect(host.scrollTo).toBe(readonly); expect(readonly).toHaveBeenCalledOnce(); expect(host.scroll).toBe(next);
+  });
+  it('原生“刷新内容”保留当前分发、不嵌套 click；下一任务恢复滚动，只推进一次批次', () => {
+    const host = { scrollTo: vi.fn(), scroll: vi.fn(), scrollBy: vi.fn() }, epoch = vi.fn();
+    const originalScrollTo = host.scrollTo;
+    const timers: Array<{ callback: () => void; delay: number }> = [];
+    const event = { button: 0, target: { closest: (selector: string) => selector === '.flexible-roll-btn-inner' ? refresh : null }, preventDefault: vi.fn(), stopImmediatePropagation: vi.fn() };
+    const refresh = { click: vi.fn() };
+    const handler = createHomeRefreshHandler({ enabled: () => true, isHome: () => true, fullRefresh: () => null, loading: () => false,
+      reload: vi.fn(), now: () => 0, later: (callback, delay) => timers.push({ callback, delay }), onFullRefresh: epoch,
+      guardNativeScroll: () => beginHomeRefreshScrollGuard(host) });
+    handler(event as any);
+    expect(event.stopImmediatePropagation).not.toHaveBeenCalled(); expect(refresh.click).not.toHaveBeenCalled();
+    host.scrollTo(0, 0); host.scrollTo(0, 0); expect(originalScrollTo).not.toHaveBeenCalled();
+    handler(event as any); expect(epoch).toHaveBeenCalledOnce(); expect(event.stopImmediatePropagation).toHaveBeenCalledOnce();
+    expect(timers.map(x => x.delay)).toEqual([0, 100]); timers[0].callback();
+    host.scrollTo(0, 0); expect(host.scrollTo).toHaveBeenCalledOnce();
+  });
+  it('转发换一换也使用防滚动保护，非左键和无关按钮不受影响', () => {
+    const guard = vi.fn((action: () => void) => action()); const refresh = { click: vi.fn() };
+    const button = { disabled: false };
+    const event = { button: 0, target: { closest: (selector: string) => selector === '.roll-btn' ? button : null }, preventDefault: vi.fn(), stopImmediatePropagation: vi.fn() };
+    const handler = createHomeRefreshHandler({ enabled: () => true, isHome: () => true, fullRefresh: () => refresh as any, loading: () => false,
+      reload: vi.fn(), now: () => 0, later: vi.fn(), withoutScroll: guard });
+    handler({ ...event, button: 1 } as any); expect(guard).not.toHaveBeenCalled();
+    handler({ ...event, target: { closest: () => null } } as any); expect(guard).not.toHaveBeenCalled();
+    handler(event as any); expect(guard).toHaveBeenCalledOnce(); expect(refresh.click).toHaveBeenCalledOnce();
   });
 });
 

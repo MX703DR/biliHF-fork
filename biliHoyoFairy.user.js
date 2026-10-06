@@ -3,7 +3,7 @@
 // @name:zh-CN   biliHoyoFairy-MX703
 // @name:en      biliHoyoFairy-MX703
 // @namespace    https://github.com/MX703DR/biliHF-fork
-// @version      0.0.10
+// @version      0.0.11
 // @description  B站(bilibili/哔哩哔哩)推荐流净化与屏蔽脚本：屏蔽黑流量、引战视频、商业广告与不想看的 UP 主。支持按 标签/UP主/UID/关键词(可正则)/分区/时长/播放量/BV 精准过滤；覆盖首页/热门/排行榜/搜索/播放页/动态/评论区；白名单优先防误伤；右键一键屏蔽/拉黑(同步账号黑名单)；内置预置关键词库与规则订阅。
 // @description:en  Clean up & block the bilibili recommendation feed: hide clickbait, flame-bait, ads and unwanted UP owners. Filter by tag/UP/UID/keyword(regex)/category/duration/views/BV across home, popular, ranking, search, video, dynamic pages and comments; whitelist priority; one-click block synced to the account blacklist; preset keyword library and rule subscriptions.
 // @author       gendu-amd
@@ -13,6 +13,7 @@
 // @updateURL    https://raw.githubusercontent.com/MX703DR/biliHF-fork/main/biliHoyoFairy.user.js
 // @downloadURL  https://raw.githubusercontent.com/MX703DR/biliHF-fork/main/biliHoyoFairy.user.js
 // @connect      api.bilibili.com
+// @connect      dav.jianguoyun.com
 // @connect      raw.githubusercontent.com
 // @connect      cdn.jsdelivr.net
 // @connect      gitee.com
@@ -3318,32 +3319,71 @@
   }
 
   // src/home-refresh.ts
+  function beginHomeRefreshScrollGuard(host) {
+    const patches = [];
+    const restore = () => {
+      for (const { name, descriptor, noop } of patches.reverse()) {
+        if (host[name] !== noop) continue;
+        if (descriptor) Object.defineProperty(host, name, descriptor);
+        else Reflect.deleteProperty(host, name);
+      }
+      patches.length = 0;
+    };
+    try {
+      for (const name of ["scroll", "scrollTo", "scrollBy"]) {
+        if (typeof host[name] !== "function") continue;
+        const descriptor = Object.getOwnPropertyDescriptor(host, name);
+        if (descriptor && !descriptor.configurable && !descriptor.writable) continue;
+        const noop = () => {
+        };
+        Object.defineProperty(host, name, { value: noop, writable: true, enumerable: descriptor?.enumerable ?? true, configurable: descriptor?.configurable ?? true });
+        patches.push({ name, descriptor, noop });
+      }
+      return restore;
+    } catch (e) {
+      restore();
+      throw e;
+    }
+  }
+  function withoutHomeRefreshScroll(host, action) {
+    const restore = beginHomeRefreshScrollGuard(host);
+    try {
+      action();
+    } finally {
+      restore();
+    }
+  }
   function createHomeRefreshHandler(deps) {
     let busy = false;
+    let dispatching = false;
     return (event) => {
+      if (dispatching) return;
       if (!deps.enabled() || !deps.isHome() || event.button !== 0) return;
       const target = event.target;
-      if (target?.closest(HOME_FULL_REFRESH)) {
-        if (!busy && !deps.loading()) deps.onFullRefresh?.();
+      const nativeButton = target?.closest(HOME_FULL_REFRESH);
+      const button = target?.closest(HOME_ROLL_BUTTON);
+      if (!button && !nativeButton) return;
+      if (busy || deps.loading()) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
         return;
       }
-      const button = target?.closest(HOME_ROLL_BUTTON);
-      if (!button) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      if (busy || deps.loading()) return;
-      const refresh = deps.fullRefresh();
+      if (!nativeButton) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+      const refresh = nativeButton || deps.fullRefresh();
       if (!refresh) {
         deps.reload();
         return;
       }
       busy = true;
-      const disabled = button.disabled;
-      button.disabled = true;
+      const disabled = button?.disabled;
+      if (button) button.disabled = true;
       const started = deps.now();
       const finish = () => {
         busy = false;
-        button.disabled = disabled;
+        if (button) button.disabled = disabled;
       };
       const check = () => {
         const elapsed = deps.now() - started;
@@ -3352,7 +3392,22 @@
       };
       try {
         deps.onFullRefresh?.();
-        refresh.click();
+        if (nativeButton) {
+          const restore = deps.guardNativeScroll?.();
+          if (restore) deps.later(restore, 0);
+          deps.later(check, 100);
+          return;
+        }
+        const click = () => {
+          dispatching = true;
+          try {
+            refresh.click();
+          } finally {
+            dispatching = false;
+          }
+        };
+        if (deps.withoutScroll) deps.withoutScroll(click);
+        else click();
         deps.later(check, 100);
       } catch (e) {
         finish();
@@ -3371,7 +3426,9 @@
       reload: () => location.reload(),
       now: () => Date.now(),
       later: (cb, ms) => setTimeout(cb, ms),
-      onFullRefresh: advanceHomeFeedEpoch
+      onFullRefresh: advanceHomeFeedEpoch,
+      withoutScroll: (action) => withoutHomeRefreshScroll(W, action),
+      guardNativeScroll: () => beginHomeRefreshScrollGuard(W)
     }), true);
   }
 
@@ -6183,13 +6240,15 @@
         data,
         timeout: REQUEST_TIMEOUT,
         anonymous: true,
+        redirect: "error",
+        // 不向仓库重定向出的未知地址发送凭据。
         onload: (r) => {
           if ((r.responseText || "").length > WEBDAV_BACKUP_MAX) return reject(new Error("WebDAV 响应超过 2MB，已拒绝读取"));
           if (r.status >= 200 && r.status < 300 || acceptedStatuses.includes(r.status)) {
             resolve({ status: r.status, body: r.responseText || "", responseHeaders: r.responseHeaders || "" });
           } else reject(new Error(webDavStatusText(r.status)));
         },
-        onerror: () => reject(new Error("网络连接失败，请检查地址、证书和 WebDAV 服务状态")),
+        onerror: () => reject(new Error(`网络连接失败，请先在脚本管理器中允许访问 ${new URL(url).hostname}，再检查地址、证书和 WebDAV 服务状态`)),
         ontimeout: () => reject(new Error("连接超时，请稍后重试"))
       });
       if (!sent) reject(new Error("当前脚本管理器不支持 WebDAV 网络请求"));
@@ -6243,8 +6302,13 @@
   async function discoverPiliNaraFiles(settings) {
     return piliNaraFilesIn(settings, await listWebDavDirectory(settings, normalizeWebDavRepositoryUrl(settings.url)));
   }
+  async function requestWebDavAccess(settings) {
+    const root = normalizeWebDavRepositoryUrl(settings.url);
+    await webDavRequest({ url: root, username: "", password: "" }, root, "PROPFIND", PROPFIND_BODY, [401, 403], { Depth: "0" });
+  }
   async function testWebDavConnection(settings) {
     const root = normalizeWebDavRepositoryUrl(settings.url);
+    await requestWebDavAccess(settings);
     const entries2 = await listWebDavDirectory(settings, root);
     const files = await piliNaraFilesIn(settings, entries2);
     const folder = entries2.find((x) => x.url === webDavBackupDirectory(settings) && x.collection);
@@ -6440,7 +6504,7 @@ ${indent}}` : "{}";
       </div>
       <div class="hint">填写仓库目录，不是文件地址。备份时自动创建 <code>${APP_NAME}/</code>，配置保存在其中的 <code>config.json</code>。自动查找仓库下的 <code>PiliNara/</code>；多个设备备份需从识别结果中选择，无需手填文件路径。</div>
       <div class="hint">PiliNara 仅同步 UID 黑名单，对应 <code>localCache.recommendBlockedMids</code>。两个方向都去重追加，不删除已有用户，不修改其他设置；不支持 BV/AV 视频名单。</div>
-      <div class="hint">配置备份不含 WebDAV 密钥、运行统计及个人状态。凭据只保存在本机；建议使用 HTTPS。首次访问自定义域名时，脚本管理器可能要求联网授权。</div>`;
+      <div class="hint">配置备份不含 WebDAV 密钥、运行统计及个人状态。凭据只保存在本机；建议使用 HTTPS。填写或保存地址不会联网。“测试连接”先用不带凭据的只读请求申请访问该域名；若油猴提示，请只允许当前 WebDAV 域名，无需允许所有网站。插件不能代替你批准管理器权限。</div>`;
       host.appendChild(sec);
       const url = q(sec, "#bfb-wd-url");
       const username = q(sec, "#bfb-wd-user");
@@ -6458,7 +6522,7 @@ ${indent}}` : "{}";
       let discoveryKey = "";
       const key = (s) => JSON.stringify([s.url, s.username, s.password]);
       const showPath = (s) => {
-        path.textContent = s.url ? `本插件备份：${webDavBackupUrl(s)}` : `本插件备份：仓库/${APP_NAME}/config.json`;
+        path.textContent = s.url ? `本插件备份：${webDavBackupUrl(s)}；联网目标：${new URL(s.url).hostname}` : `本插件备份：仓库/${APP_NAME}/config.json`;
       };
       showPath(saved);
       const readAndSave = () => {
@@ -6511,7 +6575,7 @@ ${indent}}` : "{}";
       };
       q(sec, "#bfb-wd-test").onclick = async () => {
         setBusy(true);
-        status.textContent = "正在验证仓库并识别 PiliNara…";
+        status.textContent = "正在申请 WebDAV 域名访问并验证仓库；若油猴提示，请允许该域名…";
         try {
           const s = readAndSave();
           const result = await testWebDavConnection(s);

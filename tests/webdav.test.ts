@@ -17,6 +17,7 @@ import {
   parseWebDavBackup,
   saveWebDavSettings,
   testWebDavConnection,
+  requestWebDavAccess,
   uploadWebDavBackup,
   webDavStatusText,
   writePiliNaraBlockedUsers,
@@ -88,6 +89,18 @@ describe('WebDAV 地址与凭据', () => {
 });
 
 describe('WebDAV 网络请求', () => {
+  it('通用域名授权探测只读自身，不携带凭据，401 不误判为认证失败', async () => {
+    requestMock.mockImplementation((opts: any) => {
+      expect(opts.method).toBe('PROPFIND'); expect(opts.headers.Depth).toBe('0'); expect(opts.url).toBe(settings().url);
+      expect(opts.headers.Authorization).toBeUndefined(); expect(opts.anonymous).toBe(true); expect(opts.redirect).toBe('error');
+      opts.onload({ status: 401, responseText: '' }); return true;
+    });
+    await expect(requestWebDavAccess(settings())).resolves.toBeUndefined(); expect(requestMock).toHaveBeenCalledOnce();
+  });
+  it('探测被管理器拒绝时，报告实际域名且不进入带凭据的目录请求', async () => {
+    requestMock.mockImplementation((opts: any) => { opts.onerror(); return true; });
+    await expect(testWebDavConnection(settings())).rejects.toThrow('允许访问 dav.example.com'); expect(requestMock).toHaveBeenCalledOnce();
+  });
   it('MKCOL 自动建文件夹，然后 PUT 配置；凭据不进入备份', async () => {
     const methods: string[] = [];
     requestMock.mockImplementation((opts: any) => {

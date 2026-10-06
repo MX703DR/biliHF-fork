@@ -62,7 +62,7 @@ src/
 ├─ comment-data.ts      评论响应列表过滤：父回复索引、置顶双副本、白名单、保留原始分页
 ├─ initial-data.ts      SSR 首屏：raw/head、搜索/投稿预览、hydrate 接管、Pinia shallowRef、有界等待
 ├─ initial-search.ts    视频搜索本地副本：经原生 submitSearch 一次回放同页 SSR 结果，不额外请求
-├─ home-refresh.ts      原“换一换”调用 B站原生完整刷新；过时在途批次不能回填
+├─ home-refresh.ts      原“换一换”调用 B站原生完整刷新；有限分发防滚动，过时在途批次不能回填
 ├─ home-grid.ts         原生首页 Vue 渲染适配：DOM patch 前剪枝、原生骨架补占位、规则变更重判
 │
 │  ── L4~L5 领域 / DOM ──
@@ -235,6 +235,7 @@ npm test           # vitest 纯逻辑单测
 - 元数据缓存最多 1800 项，视频 7 天/UP 1 天过期；只保存白名单字段，不存 Cookie、完整响应、播放进度等个人状态，不进入配置备份。补充取数授权属于 `NON_PORTABLE`，导入/云端恢复不能替用户开启它。
 - 超时/熔断的本批结论为临时放行：迟到元数据不能隐藏已经显示的卡片；下一批响应可用新缓存重新判定。配置版本变化不能复用旧结论。
 - 首页完整刷新复用 B站 `.flexible-roll-btn-inner` 的原生 Refresh（实测 `fresh_type=5, fetch_row=1`），不复制 BewlyCat UI、不重签/修改请求；该入口缺失时整页刷新。刷新前在途旧批次清空返回列表，防止无限滚动旧结果回填。
+- 原生 Refresh 的按钮与推荐组件同步调用两次 `window.scrollTo(0, 0)`。仅在此次刷新分发内暂时屏蔽页面的 `scroll/scrollTo/scrollBy`，转发入口用 `finally` 恢复，原生入口保留当前事件并在下一任务恢复；不得对正在执行 click 的同一元素再调用 click，也不得长期锁定页面滚动、改写独立回顶部按钮或覆盖其他扩展新装的方法。
 - 首页渲染适配只处理已识别的原生推荐组件。保留节点 key、ref、滚动观察锚点和响应式样式，不改全站布局；Vue 编译后的稳定 slot 必须转为动态 slot，避免旧占位被 slot 缓存继续复用。DOM 复用成 skeleton 时只撤销本插件自己的隐藏和标记。
 - 自检在原生请求仍在下载或过滤时不得提前报警；真实下载失败、结构失配仍须可观察。
 
@@ -248,8 +249,9 @@ npm test           # vitest 纯逻辑单测
 - **自有 UI 配色集中在 `ui/panel.styles.ts`**：新增表面要同时给暗色（`@media prefers-color-scheme:dark`）覆盖，说明性文字保证 WCAG AA（≥4.5:1）。
 - `@updateURL` 指向 main = 合入即发布；对外可见改动要 bump `meta.js` 的 `@version`，否则用户不会自动更新。
 - 第三方致谢集中在 README，勿散落代码注释。
-- **安全红线**（0.0.6 起）：`@connect` 只声明已知域（B 站 + 常见 CDN），不留 `*`；配置**导出与导入都剔除 `NON_PORTABLE`**（尤其 `subscriptions`，防分享文件注入自动联网 URL）；订阅/导入的 `/正则/` 受 `MAX_REGEX_LEN` 长度上限保护（防 ReDoS）。
+- **安全红线**（0.0.6 起）：`@connect` 只声明已知域（B 站、常见 CDN、坚果云 WebDAV），不留 `*`；其他 WebDAV 域名由管理器按域授权，不因通用性直接授予所有网站权限。配置**导出与导入都剔除 `NON_PORTABLE`**（尤其 `subscriptions`，防分享文件注入自动联网 URL）；订阅/导入的 `/正则/` 受 `MAX_REGEX_LEN` 长度上限保护（防 ReDoS）。
 - **不可信配置必须过 `sanitizeConfigInput`**（0.0.8 起）：导入路径按 `DEFAULT_CONFIG` 的形状清洗，未知键 / 类型不符的值 / 数组里的非字符串元素一律丢弃。它**只用于导入，不用于 `loadConfig`**——`DEFAULT_CONFIG.uidNames` 是 `{}`、`subscriptions` 是 `[]`，拿它们当类型参照会把用户已存的缓存与订阅全部清空。已落盘的坏配置由消费侧的 `match/normalize.ruleLines` 兜底（规则数组的唯一入口）。
 - **WebDAV 凭据隔离**：界面仅需仓库目录 URL、用户名、密钥；自动在其下创建 `biliHoyoFairy-MX703/config.json`。地址、用户名和密码只写 `WEBDAV_SETTINGS_KEY`，不得进入 `CONFIG`、普通导出、订阅或远端备份正文；下载的备份与本地文件导入一样，必须先迁移、清洗并剔除 `NON_PORTABLE`。目录发现只允许仓库同源、直接子项，拒绝跨域/越界 DAV href。PiliNara 多设备文件必须选择目标，不自动覆盖第一项。
+- **WebDAV 域名授权**：填写和保存不联网；明确点击“测试连接”后先发无凭据、无 Cookie 的 `PROPFIND Depth:0`，交由脚本管理器处理目标域名权限。探测收到 401/403 只代表可达，随后带凭据的目录读取才判断认证成功；任何网络/权限失败不得继续发认证请求。测试全程只读，不 MKCOL/PUT。网络错误提示实际域名，请求拒绝重定向，插件不代替用户批准管理器权限。
 - **PiliNara 只合并 UID**：写入前读完整文件，以远端 `localCache.recommendBlockedMids` 为基准去重并在末尾追加缺少项；保留原名单的文本顺序、名字及未知项，其他配置语义不变。没有新增项就不 PUT；有 ETag 时用 `If-Match` 防止并发静默覆盖；不能把 BV/AV 或账号 `blackMids` 写进推荐名单。
 - **账号写操作红线**：单条拉黑（右键/悬停）执行前必须二次确认；批量拉黑必须可停止、限速、风控自动退避；`doBlacklistMany` 批量本地屏蔽统一一次 `saveConfig+emitRulesChanged`（勿逐条重扫）。

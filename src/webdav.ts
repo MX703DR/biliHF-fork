@@ -108,6 +108,7 @@ function webDavRequest(
       data,
       timeout: REQUEST_TIMEOUT,
       anonymous: true,
+      redirect: 'error', // 不向仓库重定向出的未知地址发送凭据。
       onload: (r) => {
         if ((r.responseText || '').length > WEBDAV_BACKUP_MAX) return reject(new Error('WebDAV 响应超过 2MB，已拒绝读取'));
         if ((r.status >= 200 && r.status < 300) || acceptedStatuses.includes(r.status)) {
@@ -115,7 +116,7 @@ function webDavRequest(
         }
         else reject(new Error(webDavStatusText(r.status)));
       },
-      onerror: () => reject(new Error('网络连接失败，请检查地址、证书和 WebDAV 服务状态')),
+      onerror: () => reject(new Error(`网络连接失败，请先在脚本管理器中允许访问 ${new URL(url).hostname}，再检查地址、证书和 WebDAV 服务状态`)),
       ontimeout: () => reject(new Error('连接超时，请稍后重试')),
     });
     if (!sent) reject(new Error('当前脚本管理器不支持 WebDAV 网络请求'));
@@ -173,9 +174,15 @@ async function piliNaraFilesIn(settings: WebDavSettings, entries: Awaited<Return
 export async function discoverPiliNaraFiles(settings: WebDavSettings): Promise<PiliNaraFile[]> {
   return piliNaraFilesIn(settings, await listWebDavDirectory(settings, normalizeWebDavRepositoryUrl(settings.url)));
 }
+/** 首次访问由管理器处理域名授权；探测不携带用户名/密钥，只读仓库自身，不创建文件。 */
+export async function requestWebDavAccess(settings: WebDavSettings): Promise<void> {
+  const root = normalizeWebDavRepositoryUrl(settings.url);
+  await webDavRequest({ url: root, username: '', password: '' }, root, 'PROPFIND', PROPFIND_BODY, [401, 403], { Depth: '0' });
+}
 /** 只读连接测试；备份时才创建本插件的目录，不写 PiliNara。 */
 export async function testWebDavConnection(settings: WebDavSettings): Promise<{ backupExists: boolean; piliNaraFiles: PiliNaraFile[] }> {
   const root = normalizeWebDavRepositoryUrl(settings.url);
+  await requestWebDavAccess(settings);
   const entries = await listWebDavDirectory(settings, root);
   const files = await piliNaraFilesIn(settings, entries);
   const folder = entries.find((x) => x.url === webDavBackupDirectory(settings) && x.collection);

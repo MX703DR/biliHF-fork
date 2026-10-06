@@ -32,7 +32,7 @@ export const webdavSection: PanelSection = {
       </div>
       <div class="hint">填写仓库目录，不是文件地址。备份时自动创建 <code>${APP_NAME}/</code>，配置保存在其中的 <code>config.json</code>。自动查找仓库下的 <code>PiliNara/</code>；多个设备备份需从识别结果中选择，无需手填文件路径。</div>
       <div class="hint">PiliNara 仅同步 UID 黑名单，对应 <code>localCache.recommendBlockedMids</code>。两个方向都去重追加，不删除已有用户，不修改其他设置；不支持 BV/AV 视频名单。</div>
-      <div class="hint">配置备份不含 WebDAV 密钥、运行统计及个人状态。凭据只保存在本机；建议使用 HTTPS。首次访问自定义域名时，脚本管理器可能要求联网授权。</div>`;
+      <div class="hint">配置备份不含 WebDAV 密钥、运行统计及个人状态。凭据只保存在本机；建议使用 HTTPS。填写或保存地址不会联网。“测试连接”先用不带凭据的只读请求申请访问该域名；若油猴提示，请只允许当前 WebDAV 域名，无需允许所有网站。插件不能代替你批准管理器权限。</div>`;
     host.appendChild(sec);
     const url = q<HTMLInputElement>(sec, '#bfb-wd-url'); const username = q<HTMLInputElement>(sec, '#bfb-wd-user');
     const password = q<HTMLInputElement>(sec, '#bfb-wd-pass'); const status = q(sec, '#bfb-wd-status');
@@ -42,7 +42,7 @@ export const webdavSection: PanelSection = {
     url.value = saved.url; username.value = saved.username; password.value = saved.password;
     let files: PiliNaraFile[] = []; let discoveryKey = '';
     const key = (s: WebDavSettings) => JSON.stringify([s.url, s.username, s.password]);
-    const showPath = (s: WebDavSettings) => { path.textContent = s.url ? `本插件备份：${webDavBackupUrl(s)}` : `本插件备份：仓库/${APP_NAME}/config.json`; };
+    const showPath = (s: WebDavSettings) => { path.textContent = s.url ? `本插件备份：${webDavBackupUrl(s)}；联网目标：${new URL(s.url).hostname}` : `本插件备份：仓库/${APP_NAME}/config.json`; };
     showPath(saved);
     const readAndSave = () => {
       const s = saveWebDavSettings({ url: url.value, username: username.value, password: password.value });
@@ -68,7 +68,7 @@ export const webdavSection: PanelSection = {
     };
     q(sec, '#bfb-wd-save').onclick = () => { try { readAndSave(); status.textContent = '设置已保存，点击“测试连接”自动识别目录与设备备份'; toast('WebDAV 设置已保存', 'success'); } catch (e) { fail(e); } };
     q(sec, '#bfb-wd-test').onclick = async () => {
-      setBusy(true); status.textContent = '正在验证仓库并识别 PiliNara…';
+      setBusy(true); status.textContent = '正在申请 WebDAV 域名访问并验证仓库；若油猴提示，请允许该域名…';
       try {
         const s = readAndSave(); const result = await testWebDavConnection(s); setFiles(s, result.piliNaraFiles);
         status.textContent = result.backupExists ? '连接成功，已找到本插件备份' : '连接成功，点击“立即备份”自动创建本插件目录和配置文件';
