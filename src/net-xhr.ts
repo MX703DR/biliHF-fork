@@ -68,7 +68,8 @@ export function installXhrHooks(W: any, filters: XhrFilters): void {
       if (complete) return;
       parse();
       let changed = 0;
-      try { if (json) changed = filters.sync(target, json, context); } catch (e) { /* 故障放行 */ }
+      try { if (json) changed = filters.sync(target, json, context); }
+      catch (e) { if ((e as any)?.name === 'AbortError') { xhr.abort(); throw e; } /* 其他故障放行 */ }
       commit(changed);
     };
     Object.defineProperties(xhr, {
@@ -132,7 +133,11 @@ export function installXhrHooks(W: any, filters: XhrFilters): void {
       parse();
       Promise.resolve().then(() => json ? filters.async(target, json, context) : 0).then(
         (changed) => { if (!closed) { commit(changed); flush(); } },
-        () => { if (!closed) { commit(0); flush(); } },
+        (error) => {
+          if (closed) return;
+          if (error?.name === 'AbortError') xhr.abort();
+          else { commit(0); flush(); }
+        },
       );
     };
     const types = ['readystatechange', 'progress', 'load', 'loadend'];

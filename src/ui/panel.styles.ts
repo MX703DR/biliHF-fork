@@ -78,8 +78,8 @@
     #bfb-panel .bfb-webdav-fields input:focus{outline:none;border-color:#fb7299;box-shadow:0 0 0 2px rgba(251,114,153,.18)}
     #bfb-panel .bfb-webdav-fields label{margin:0;font-size:12px}
     #bfb-panel .bfb-webdav-fields input{display:block;margin-top:5px}
-    #bfb-panel #bfb-wd-path,#bfb-panel #bfb-wd-found{overflow-wrap:anywhere}
-    #bfb-panel #bfb-wd-devices[hidden]{display:none}
+    #bfb-panel #bfb-wd-path,#bfb-panel #bfb-wd-found,#bfb-panel #bfb-wd-piliplus-target{overflow-wrap:anywhere}
+    #bfb-panel #bfb-wd-devices[hidden],#bfb-panel #bfb-wd-piliplus-fields[hidden]{display:none}
     #bfb-panel #bfb-wd-devices{margin-top:10px}
     #bfb-panel #bfb-wd-device{display:block;margin-top:5px;width:100%;padding:7px;border:1px solid #ddd;border-radius:8px;background:#fff;color:#222}
     #bfb-panel .bfb-webdav-fields input:-webkit-autofill{-webkit-text-fill-color:#222;box-shadow:0 0 0 1000px #fff inset}

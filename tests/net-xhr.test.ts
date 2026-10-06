@@ -68,6 +68,12 @@ describe('XHR 渲染前异步闸门', () => {
     expect(h.seen).toEqual(['readystatechange:2', 'readystatechange:0', 'abort:0', 'loadend:0']);
     h.finish(); await tick(); expect(h.seen.filter((e) => e === 'load:4')).toHaveLength(0);
   });
+  it('异步过滤拒绝旧推荐批次时投递 abort，不把旧成功或风控正文放行', async () => {
+    const h = harness(); h.asyncFilter.mockImplementation(() => Promise.reject(new DOMException('stale', 'AbortError')));
+    h.xhr.open('GET', '/feed'); h.listen(); h.xhr.respond(); await tick();
+    expect(h.seen).toEqual(['readystatechange:2', 'readystatechange:0', 'abort:0', 'loadend:0']);
+    expect(h.xhr.responseText).toBe(''); expect(h.pending()).toBe(0);
+  });
   it('同步 XHR 只同步判定，不改变同步契约', () => {
     const h = harness(); (h.xhr as any).open('GET', '/feed', false); h.xhr.respond();
     expect(h.xhr.readyState).toBe(4); expect(JSON.parse(h.xhr.responseText).items).toEqual([1]); expect(h.asyncFilter).not.toHaveBeenCalled();

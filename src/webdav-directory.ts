@@ -26,6 +26,32 @@ export function repositoryChildUrl(root: string, names: string[], collection = f
   return new URL(names.map(encodeURIComponent).join('/') + (collection ? '/' : ''), normalizeWebDavRepositoryUrl(root)).href;
 }
 
+/** 路径从 WebDAV 仓库根算起；尾斜杠或不含扩展名视作目录，目录默认手机设置文件。 */
+export function resolveWebDavFilePath(root: string, raw: string, defaultFile = 'piliplus_settings_phone.json'): string {
+  const path = raw.trim();
+  if (!path || path.length > 4096) throw new Error('请填写 PiliPlus 配置文件或目录路径');
+  // eslint-disable-next-line no-control-regex -- 用户输入路径禁止控制字符与跨层转义。
+  if (/[\\\u0000-\u001f?#]/.test(path)) throw new Error('PiliPlus 路径不能包含查询参数、反斜杠或控制字符');
+  const absolute = /^https?:\/\//i.test(path);
+  const inputParts = (absolute ? path.replace(/^https?:\/\/[^/]+/i, '') : path).split('/').filter(Boolean);
+  for (const part of inputParts) {
+    let value: string; try { value = decodeURIComponent(part); } catch { throw new Error('PiliPlus 路径编码无效'); }
+    // eslint-disable-next-line no-control-regex -- 同时阻止编码的分隔符和路径逃逸。
+    if (value === '.' || value === '..' || /[/\\\u0000-\u001f]/.test(value)) throw new Error('PiliPlus 路径不能越出仓库或包含编码分隔符');
+  }
+  let parts: string[];
+  if (absolute) {
+    const relative = repositoryRelativePath(root, path);
+    if (!relative) throw new Error('PiliPlus 文件不在当前 WebDAV 仓库下；不同服务请开启独立登录');
+    parts = relative;
+  } else {
+    if (/^[a-z][a-z\d+.-]*:/i.test(path) || path.startsWith('//')) throw new Error('PiliPlus 路径必须位于当前 WebDAV 仓库下');
+    parts = inputParts.map(decodeURIComponent);
+  }
+  if (path.endsWith('/') || !/\.[^./]+$/.test(parts[parts.length - 1] || '')) parts.push(defaultFile);
+  return repositoryChildUrl(root, parts);
+}
+
 function pathParts(url: URL): string[] | null {
   try {
     const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);

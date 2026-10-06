@@ -12,7 +12,7 @@ import {
 } from './config';
 import { gmRequest } from './gm';
 import { jsonPropertySpan } from './json-span';
-import { normalizeWebDavRepositoryUrl, parseWebDavDirectory, repositoryChildUrl, repositoryRelativePath } from './webdav-directory';
+import { normalizeWebDavRepositoryUrl, parseWebDavDirectory, repositoryChildUrl, repositoryRelativePath, resolveWebDavFilePath } from './webdav-directory';
 export { normalizeWebDavRepositoryUrl } from './webdav-directory';
 
 export interface WebDavSettings {
@@ -20,7 +20,17 @@ export interface WebDavSettings {
   username: string;
   password: string;
   legacyBackupUrl?: string; // 旧文件只作恢复兜底；不会再向它写入。
+  piliPlus?: PiliPlusSettings;
 }
+
+export interface PiliPlusSettings {
+  path: string;
+  separate: boolean;
+  url: string;
+  username: string;
+  password: string;
+}
+export const EMPTY_PILIPLUS: PiliPlusSettings = { path: '', separate: false, url: '', username: '', password: '' };
 
 const EMPTY_SETTINGS: WebDavSettings = { url: '', username: '', password: '' };
 export const WEBDAV_BACKUP_MAX = 2 * 1024 * 1024;
@@ -31,10 +41,10 @@ function str(v: unknown, max: number): string {
 }
 
 function legacyRepository(parsed: any): string {
-  const backup = str(parsed.url, 4096); const pili = str(parsed.piliNaraUrl, 4096);
+  const backup = str(parsed.url, 4096); const pili = str(parsed.piliPlusUrl ?? parsed.piliNaraUrl, 4096);
   if (pili) {
     const url = new URL(pili);
-    const at = url.pathname.toLowerCase().lastIndexOf('/pilinara/');
+    const at = url.pathname.lastIndexOf('/', url.pathname.lastIndexOf('/') - 1);
     if (at >= 0) {
       url.pathname = url.pathname.slice(0, at + 1); url.hash = '';
       const root = normalizeWebDavRepositoryUrl(url.href);
@@ -49,13 +59,21 @@ export function loadWebDavSettings(): WebDavSettings {
     const raw = GM_getValue(WEBDAV_SETTINGS_KEY, null);
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (!parsed || typeof parsed !== 'object') return { ...EMPTY_SETTINGS };
-    const url = parsed.schemaVersion === 2 ? (parsed.url ? normalizeWebDavRepositoryUrl(str(parsed.url, 4096)) : '') : legacyRepository(parsed);
-    const oldFile = str(parsed.schemaVersion === 2 ? parsed.legacyBackupUrl : parsed.url, 4096);
+    const current = parsed.schemaVersion >= 2;
+    const url = current ? (parsed.url ? normalizeWebDavRepositoryUrl(str(parsed.url, 4096)) : '') : legacyRepository(parsed);
+    const oldFile = str(current ? parsed.legacyBackupUrl : parsed.url, 4096);
+    const oldPili = str(parsed.piliPlusUrl ?? parsed.piliNaraUrl, 4096);
+    const options = parsed.piliPlus && typeof parsed.piliPlus === 'object' ? parsed.piliPlus : null;
+    const migratedPath = oldPili && repositoryRelativePath(url, oldPili)?.map(encodeURIComponent).join('/');
     return {
       url,
       ...(oldFile && /\.json(?:[#?]|$)/i.test(oldFile) && repositoryRelativePath(url, oldFile) ? { legacyBackupUrl: oldFile } : {}),
       username: str(parsed.username, 512),
       password: str(parsed.password, 1024),
+      ...(options || migratedPath ? { piliPlus: {
+        path: str(options?.path, 4096) || migratedPath || '', separate: options?.separate === true,
+        url: str(options?.url, 4096), username: str(options?.username, 512), password: str(options?.password, 1024),
+      } } : {}),
     };
   } catch {
     return { ...EMPTY_SETTINGS };
@@ -69,8 +87,12 @@ export function saveWebDavSettings(input: WebDavSettings): WebDavSettings {
     password: str(input.password, 1024),
   };
   const oldFile = input.legacyBackupUrl || loadWebDavSettings().legacyBackupUrl;
-  const saved = { ...settings, ...(oldFile && repositoryRelativePath(settings.url, oldFile) ? { legacyBackupUrl: oldFile } : {}) };
-  GM_setValue(WEBDAV_SETTINGS_KEY, JSON.stringify({ schemaVersion: 2, ...saved }));
+  const p = input.piliPlus ?? loadWebDavSettings().piliPlus;
+  const piliPlus = p && { path: str(p.path, 4096).trim(), separate: p.separate === true, url: str(p.url, 4096).trim(), username: str(p.username, 512), password: str(p.password, 1024) };
+  if (piliPlus?.separate) piliPlus.url = normalizeWebDavRepositoryUrl(piliPlus.url);
+  const saved = { ...settings, ...(piliPlus ? { piliPlus } : {}), ...(oldFile && repositoryRelativePath(settings.url, oldFile) ? { legacyBackupUrl: oldFile } : {}) };
+  if (piliPlus?.path && (piliPlus.separate || settings.url)) resolveWebDavFilePath(piliPlus.separate ? piliPlus.url : settings.url, piliPlus.path);
+  GM_setValue(WEBDAV_SETTINGS_KEY, JSON.stringify({ schemaVersion: 3, ...saved }));
   return saved;
 }
 
@@ -164,30 +186,48 @@ async function listWebDavDirectory(settings: WebDavSettings, directory: string, 
   const response = await webDavRequest(settings, directory, 'PROPFIND', PROPFIND_BODY, [], { Depth: depth });
   return parseWebDavDirectory(response.body, settings.url, directory);
 }
-export interface PiliNaraFile { url: string; name: string; device: string }
-async function piliNaraFilesIn(settings: WebDavSettings, entries: Awaited<ReturnType<typeof listWebDavDirectory>>): Promise<PiliNaraFile[]> {
-  const folders = entries.filter((x) => x.collection && x.name.toLowerCase() === 'pilinara' && repositoryRelativePath(settings.url, x.url)?.length === 1);
+export interface PiliPlusFile { url: string; name: string; device: string }
+export function piliPlusConnection(settings: WebDavSettings): WebDavSettings {
+  const p = settings.piliPlus;
+  if (!p?.separate) return { url: normalizeWebDavRepositoryUrl(settings.url), username: settings.username, password: settings.password };
+  return { url: normalizeWebDavRepositoryUrl(p.url), username: p.username, password: p.password };
+}
+async function piliPlusFilesIn(settings: WebDavSettings, entries: Awaited<ReturnType<typeof listWebDavDirectory>>): Promise<PiliPlusFile[]> {
+  const folders = entries.filter((x) => x.collection && x.name.toLowerCase() === 'piliplus' && repositoryRelativePath(settings.url, x.url)?.length === 1);
   const lists = await Promise.all(folders.map((x) => listWebDavDirectory(settings, x.url)));
   return lists.flat().filter((x) => !x.collection && /^piliplus_settings_(phone|pad|desktop)\.json$/i.test(x.name))
     .map((x) => ({ url: x.url, name: x.name, device: x.name.match(/_(phone|pad|desktop)\.json$/i)![1].toLowerCase() })).sort((a, b) => a.name.localeCompare(b.name));
 }
-export async function discoverPiliNaraFiles(settings: WebDavSettings): Promise<PiliNaraFile[]> {
-  return piliNaraFilesIn(settings, await listWebDavDirectory(settings, normalizeWebDavRepositoryUrl(settings.url)));
+export async function discoverPiliPlusFiles(settings: WebDavSettings): Promise<PiliPlusFile[]> {
+  const connection = piliPlusConnection(settings);
+  if (settings.piliPlus?.path.trim()) {
+    const url = resolveWebDavFilePath(connection.url, settings.piliPlus.path);
+    const parts = repositoryRelativePath(connection.url, url)!; const name = parts[parts.length - 1];
+    return [{ url, name, device: name.match(/_(phone|pad|desktop)\.json$/i)?.[1].toLowerCase() || 'custom' }];
+  }
+  return piliPlusFilesIn(connection, await listWebDavDirectory(connection, connection.url));
 }
 /** 首次访问由管理器处理域名授权；探测不携带用户名/密钥，只读仓库自身，不创建文件。 */
 export async function requestWebDavAccess(settings: WebDavSettings): Promise<void> {
   const root = normalizeWebDavRepositoryUrl(settings.url);
   await webDavRequest({ url: root, username: '', password: '' }, root, 'PROPFIND', PROPFIND_BODY, [401, 403], { Depth: '0' });
 }
-/** 只读连接测试；备份时才创建本插件的目录，不写 PiliNara。 */
-export async function testWebDavConnection(settings: WebDavSettings): Promise<{ backupExists: boolean; piliNaraFiles: PiliNaraFile[] }> {
+/** 只读连接测试；备份时才创建本插件的目录，不写 PiliPlus。 */
+export async function testWebDavConnection(settings: WebDavSettings): Promise<{ backupExists: boolean; piliPlusFiles: PiliPlusFile[] }> {
   const root = normalizeWebDavRepositoryUrl(settings.url);
   await requestWebDavAccess(settings);
   const entries = await listWebDavDirectory(settings, root);
-  const files = await piliNaraFilesIn(settings, entries);
   const folder = entries.find((x) => x.url === webDavBackupDirectory(settings) && x.collection);
   const backupExists = !!folder && (await listWebDavDirectory(settings, folder.url)).some((x) => x.url === webDavBackupUrl(settings) && !x.collection);
-  return { backupExists, piliNaraFiles: files };
+  return { backupExists, piliPlusFiles: [] }; // 本插件测试只测试自己的服务；PiliPlus 单独只读测试。
+}
+
+export async function testPiliPlusConnection(settings: WebDavSettings, chosen?: string): Promise<{ file: string; remoteCount: number }> {
+  const connection = piliPlusConnection(settings);
+  await requestWebDavAccess(connection);
+  const file = await piliPlusTarget(settings, chosen);
+  const response = await webDavRequest(connection, file, 'GET');
+  return { file, remoteCount: Object.keys(parsePiliPlusBlockedUsers(response.body)).length };
 }
 
 // 远端内容不可信：沿用文件导入的迁移、形状清洗和 NON_PORTABLE 隔离，再交给恢复流程。
@@ -216,21 +256,21 @@ export function restoreWebDavBackup(raw: string): void {
   saveConfig();
 }
 
-// —— PiliNara 兼容层 ——
-// PiliNara 的 WebDAV 文件是完整设置快照：{ setting, video, localCache }。
-// 推荐流“屏蔽用户”只对应 localCache.recommendBlockedMids（UID -> 显示名）；
+// —— PiliPlus 兼容层 ——
+// Hive 导出的 Box.name 实际为小写 localcache；同时兼容早期 camelCase 快照。
+// 推荐流“屏蔽用户”只对应 localcache.recommendBlockedMids（UID -> 显示名）；
 // blackMids 是 B 站账号级黑名单缓存，语义不同，绝不能拿本插件的本地黑名单去覆盖。
-export interface PiliNaraBlockedUsers {
+export interface PiliPlusBlockedUsers {
   [uid: string]: string;
 }
 
-export interface PiliNaraImportResult {
+export interface PiliPlusImportResult {
   remoteCount: number;
   added: number;
   localCount: number;
 }
 
-export interface PiliNaraWriteResult {
+export interface PiliPlusWriteResult {
   written: number;
   added: number;
   skippedInvalidUids: number;
@@ -245,25 +285,30 @@ function normalizeUid(v: unknown): string {
   return /^[1-9]\d{0,19}$/.test(s) ? s : '';
 }
 
-function parsePiliNaraDocument(raw: string): Record<string, any> {
-  if (!raw || raw.length > WEBDAV_BACKUP_MAX) throw new Error('PiliNara 配置文件为空或超过 2MB');
+function parsePiliPlusDocument(raw: string): Record<string, any> {
+  if (!raw || raw.length > WEBDAV_BACKUP_MAX) throw new Error('PiliPlus 配置文件为空或超过 2MB');
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new Error('PiliNara 配置文件不是有效的 JSON');
+    throw new Error('PiliPlus 配置文件不是有效的 JSON');
   }
-  if (!isJsonRecord(parsed) || !isJsonRecord(parsed.setting) || !isJsonRecord(parsed.video) || !isJsonRecord(parsed.localCache)) {
-    throw new Error('文件不符合 PiliNara WebDAV 设置备份结构');
+  if (!isJsonRecord(parsed) || !isJsonRecord(parsed.setting) || !isJsonRecord(parsed.video)) {
+    throw new Error('文件不符合 PiliPlus WebDAV 设置备份结构');
   }
+  if (!isJsonRecord(parsed[cacheKeyOf(parsed)])) throw new Error('PiliPlus 备份未包含有效的 localcache 屏蔽数据，请在支持导出屏蔽名单的客户端中重新备份');
   return parsed;
 }
 
-function blockedUsersOf(doc: Record<string, any>): PiliNaraBlockedUsers {
-  const raw = doc.localCache.recommendBlockedMids;
-  const out: PiliNaraBlockedUsers = Object.create(null) as PiliNaraBlockedUsers;
+function cacheKeyOf(doc: Record<string, any>): 'localcache' | 'localCache' {
+  return Object.prototype.hasOwnProperty.call(doc, 'localcache') ? 'localcache' : 'localCache';
+}
+
+function blockedUsersOf(doc: Record<string, any>): PiliPlusBlockedUsers {
+  const raw = doc[cacheKeyOf(doc)].recommendBlockedMids;
+  const out: PiliPlusBlockedUsers = Object.create(null) as PiliPlusBlockedUsers;
   if (Array.isArray(raw)) {
-    // 兼容 PiliNara 旧版 Set<int> 经 JSON 导出后的数组形式。
+    // 兼容 PiliPlus 旧版 Set<int> 经 JSON 导出后的数组形式。
     for (const value of raw) {
       const uid = normalizeUid(value);
       if (uid) out[uid] = `UID:${uid}`;
@@ -276,19 +321,19 @@ function blockedUsersOf(doc: Record<string, any>): PiliNaraBlockedUsers {
       out[uid] = name || `UID:${uid}`;
     }
   } else if (raw != null) {
-    throw new Error('PiliNara 的 recommendBlockedMids 字段格式不受支持');
+    throw new Error('PiliPlus 的 recommendBlockedMids 字段格式不受支持');
   }
   return out;
 }
 
-/** 只读取 PiliNara 的推荐流屏蔽用户；不会把账号级 blackMids 混进来。 */
-export function parsePiliNaraBlockedUsers(raw: string): PiliNaraBlockedUsers {
-  return blockedUsersOf(parsePiliNaraDocument(raw));
+/** 只读取 PiliPlus 的推荐流屏蔽用户；不会把账号级 blackMids 混进来。 */
+export function parsePiliPlusBlockedUsers(raw: string): PiliPlusBlockedUsers {
+  return blockedUsersOf(parsePiliPlusDocument(raw));
 }
 
-/** 将 PiliNara 屏蔽用户并入本插件 UID 黑名单（仅增不删）。 */
-export function importPiliNaraBlockedUsers(raw: string): PiliNaraImportResult {
-  const remote = parsePiliNaraBlockedUsers(raw);
+/** 将 PiliPlus 屏蔽用户并入本插件 UID 黑名单（仅增不删）。 */
+export function importPiliPlusBlockedUsers(raw: string): PiliPlusImportResult {
+  const remote = parsePiliPlusBlockedUsers(raw);
   const seen = new Set(CONFIG.block.uids.map(String));
   let added = 0;
   let namesChanged = false;
@@ -307,38 +352,40 @@ export function importPiliNaraBlockedUsers(raw: string): PiliNaraImportResult {
   return { remoteCount: Object.keys(remote).length, added, localCount: CONFIG.block.uids.length };
 }
 
-// JSON.stringify 会把形如 UID 的整数键按数值重排，可能让“追加项”跑到文件前面。
-// 用一次性占位符序列化外壳，再按明确的 entries 顺序写回这一小段对象，保证新增 UID 真正在末尾。
-function stringifyPiliNaraDocument(doc: Record<string, any>, entries: Array<[string, string]>, originalMap = ''): string {
-  const marker = `__bfb_pilinara_blocked_${Date.now()}_${Math.random()}__`;
-  doc.localCache.recommendBlockedMids = marker;
-  const shell = JSON.stringify(doc, null, 4);
-  const needle = JSON.stringify(marker);
-  const span = jsonPropertySpan(shell, ['localCache', 'recommendBlockedMids']);
-  const at = span?.start ?? -1;
-  if (at < 0) throw new Error('无法生成 PiliNara 屏蔽名单');
-  const lineStart = shell.lastIndexOf('\n', at) + 1;
-  const indent = (shell.slice(lineStart).match(/^\s*/) || [''])[0];
+// 只替换黑名单对应的 JSON 文本片段：其他设置连空格/大整数/键名大小写都保持原样。
+// 不序列化整份文件，避免 JSON.stringify 把整数 UID 键重排或损失未知字段的大整数精度。
+function appendPiliPlusUsers(raw: string, doc: Record<string, any>, entries: Array<[string, string]>, originalMap = ''): string {
+  const cacheKey = cacheKeyOf(doc);
+  const span = jsonPropertySpan(raw, [cacheKey, 'recommendBlockedMids']);
+  const cacheSpan = jsonPropertySpan(raw, [cacheKey]);
+  if (!cacheSpan) throw new Error('无法定位 PiliPlus 屏蔽名单');
+  const at = span?.start ?? cacheSpan.start;
+  const lineStart = raw.lastIndexOf('\n', at) + 1;
+  const indent = (raw.slice(lineStart).match(/^\s*/) || [''])[0] + (span ? '' : '    ');
   const childIndent = indent + '    ';
   const addedJson = entries.map(([uid, name]) => `${childIndent}${JSON.stringify(uid)}: ${JSON.stringify(name)}`).join(',\n');
   const mapJson = originalMap
     ? originalMap.slice(0, -1).trimEnd() + (Object.keys(JSON.parse(originalMap)).length ? ',' : '') + `\n${addedJson}\n${indent}}`
     : entries.length ? `{\n${addedJson}\n${indent}}` : '{}';
-  return shell.slice(0, at) + mapJson + shell.slice(at + needle.length);
+  if (span) return raw.slice(0, span.start) + mapJson + raw.slice(span.end);
+  const cache = raw.slice(cacheSpan.start, cacheSpan.end);
+  const updated = cache.slice(0, -1).trimEnd() + (Object.keys(doc[cacheKey]).length ? ',' : '') + `\n${indent}"recommendBlockedMids": ${mapJson}\n${indent.slice(0, -4)}}`;
+  return raw.slice(0, cacheSpan.start) + updated + raw.slice(cacheSpan.end);
 }
 
 /**
- * 生成更新后的 PiliNara 完整设置文件。以远端 recommendBlockedMids 为基准，重复 UID 保留远端
+ * 生成更新后的 PiliPlus 完整设置文件。以远端 recommendBlockedMids 为基准，重复 UID 保留远端
  * 原值，只把本地新增 UID 追加进去；setting/video、账号级 blackMids、动态/评论名单等全部原样保留。
- * PiliNara 没有独立 BV/AV 黑名单字段，故不写 block.bvids。
+ * PiliPlus 没有独立 BV/AV 黑名单字段，故不写 block.bvids。
  */
-export function buildPiliNaraBackupWithMergedBlockedUsers(raw: string): { body: string; result: PiliNaraWriteResult } {
-  const doc = parsePiliNaraDocument(raw);
+export function buildPiliPlusBackupWithMergedBlockedUsers(raw: string): { body: string; result: PiliPlusWriteResult } {
+  const doc = parsePiliPlusDocument(raw);
   const oldUsers = blockedUsersOf(doc);
-  const original = doc.localCache.recommendBlockedMids;
-  const span = isJsonRecord(original) ? jsonPropertySpan(raw, ['localCache', 'recommendBlockedMids']) : null;
+  const cacheKey = cacheKeyOf(doc);
+  const original = doc[cacheKey].recommendBlockedMids;
+  const span = isJsonRecord(original) ? jsonPropertySpan(raw, [cacheKey, 'recommendBlockedMids']) : null;
   const originalMap = span ? raw.slice(span.start, span.end) : '';
-  const next: PiliNaraBlockedUsers = Object.create(null) as PiliNaraBlockedUsers;
+  const next: PiliPlusBlockedUsers = Object.create(null) as PiliPlusBlockedUsers;
   const orderedEntries = originalMap ? [] : Object.entries(oldUsers);
   // 远端条目先进入结果，既保留名称，也表达“本地新增项追加到末尾”的合并语义。
   for (const [uid, name] of Object.entries(oldUsers)) next[uid] = name;
@@ -356,20 +403,22 @@ export function buildPiliNaraBackupWithMergedBlockedUsers(raw: string): { body: 
     added++;
   }
   return {
-    body: added ? stringifyPiliNaraDocument(doc, orderedEntries, originalMap) : raw,
+    body: added ? appendPiliPlusUsers(raw, doc, orderedEntries, originalMap) : raw,
     result: { written: (isJsonRecord(original) ? Object.keys(original).length : Object.keys(oldUsers).length) + added, added, skippedInvalidUids },
   };
 }
 
-async function piliNaraTarget(settings: WebDavSettings, chosen?: string): Promise<string> {
+async function piliPlusTarget(settings: WebDavSettings, chosen?: string): Promise<string> {
+  const connection = piliPlusConnection(settings);
   if (chosen) {
-    const relative = repositoryRelativePath(settings.url, chosen);
-    if (!relative || relative.length !== 2 || relative[0].toLowerCase() !== 'pilinara' || !/^piliplus_settings_(phone|pad|desktop)\.json$/i.test(relative[1])) throw new Error('PiliNara 文件不在当前仓库下');
+    const relative = repositoryRelativePath(connection.url, chosen);
+    const explicit = settings.piliPlus?.path.trim();
+    if (!relative?.length || chosen.endsWith('/') || (explicit ? chosen !== resolveWebDavFilePath(connection.url, explicit) : relative.length !== 2 || relative[0].toLowerCase() !== 'piliplus' || !/^piliplus_settings_(phone|pad|desktop)\.json$/i.test(relative[1]))) throw new Error('PiliPlus 文件不在当前仓库或与配置路径不一致');
     return chosen;
   }
-  const files = await discoverPiliNaraFiles(settings);
-  if (!files.length) throw new Error('未找到 PiliNara 配置，请确认仓库下有 PiliNara 文件夹，并先在 PiliNara 中备份设置');
-  if (files.length > 1) throw new Error('发现多个 PiliNara 设备备份，请先测试连接并选择要合并的设备');
+  const files = await discoverPiliPlusFiles(settings);
+  if (!files.length) throw new Error('未找到 PiliPlus 配置，请确认仓库下有 PiliPlus 文件夹，并先在 PiliPlus 中备份设置');
+  if (files.length > 1) throw new Error('发现多个 PiliPlus 设备备份，请先测试连接并选择要合并的设备');
   return files[0].url;
 }
 
@@ -382,22 +431,23 @@ function responseHeader(raw: string, name: string): string {
   return '';
 }
 
-/** 从 PiliNara 文件合并读取屏蔽用户到本插件。 */
-export async function readPiliNaraBlockedUsers(settings: WebDavSettings, chosen?: string): Promise<PiliNaraImportResult> {
-  const response = await webDavRequest(settings, await piliNaraTarget(settings, chosen), 'GET');
-  return importPiliNaraBlockedUsers(response.body);
+/** 从 PiliPlus 文件合并读取屏蔽用户到本插件。 */
+export async function readPiliPlusBlockedUsers(settings: WebDavSettings, chosen?: string): Promise<PiliPlusImportResult> {
+  const response = await webDavRequest(piliPlusConnection(settings), await piliPlusTarget(settings, chosen), 'GET');
+  return importPiliPlusBlockedUsers(response.body);
 }
 
 /**
- * 读改写 PiliNara 文件：保留远端 recommendBlockedMids，去重后追加本插件缺少的 UID。
+ * 读改写 PiliPlus 文件：保留远端 recommendBlockedMids，去重后追加本插件缺少的 UID。
  * 服务端提供 ETag 时带 If-Match，阻止两个设备同时保存造成的静默覆盖。
  */
-export async function writePiliNaraBlockedUsers(settings: WebDavSettings, chosen?: string): Promise<PiliNaraWriteResult> {
-  const target = await piliNaraTarget(settings, chosen);
-  const response = await webDavRequest(settings, target, 'GET');
-  const updated = buildPiliNaraBackupWithMergedBlockedUsers(response.body);
-  if (updated.body.length > WEBDAV_BACKUP_MAX) throw new Error('更新后的 PiliNara 配置超过 2MB，已拒绝写入');
+export async function writePiliPlusBlockedUsers(settings: WebDavSettings, chosen?: string): Promise<PiliPlusWriteResult> {
+  const target = await piliPlusTarget(settings, chosen);
+  const connection = piliPlusConnection(settings);
+  const response = await webDavRequest(connection, target, 'GET');
+  const updated = buildPiliPlusBackupWithMergedBlockedUsers(response.body);
+  if (updated.body.length > WEBDAV_BACKUP_MAX) throw new Error('更新后的 PiliPlus 配置超过 2MB，已拒绝写入');
   const etag = responseHeader(response.responseHeaders, 'etag');
-  if (updated.result.added) await webDavRequest(settings, target, 'PUT', updated.body, [], etag ? { 'If-Match': etag } : {});
+  if (updated.result.added) await webDavRequest(connection, target, 'PUT', updated.body, [], etag ? { 'If-Match': etag } : {});
   return updated.result;
 }

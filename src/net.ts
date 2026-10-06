@@ -241,12 +241,9 @@ const homeRequestContext = (url: string): number | undefined =>
 
 function discardStaleHomeFeed(json: any, context: unknown, note = true): number | null {
   if (typeof context !== 'number' || context === homeFeedEpoch) return null;
-  const arr = json?.code === 0 && json.data?.item;
-  if (!Array.isArray(arr)) return null;
-  if (note) health.feedParsed++; // 已确认响应形状；丢弃过时批次不意味着管线解析失败。
-  const count = arr.length;
-  arr.length = 0;
-  return count; // 过时的批次不是“规则屏蔽”，不计入屏蔽记录，也不能再追加回刚刷新的页面。
+  if (note && json?.code === 0 && Array.isArray(json.data?.item)) health.feedParsed++;
+  // 旧错误响应也要取消，否则旧 62011 会把新 store 的 noMoreFeed 重新设为 true。
+  throw new DOMException('Homepage recommendation generation changed', 'AbortError');
 }
 
 // 注册唯一的内容过滤 postFn（即 filterFeedJson）；以后新增过滤器只需再 addPost 一条。

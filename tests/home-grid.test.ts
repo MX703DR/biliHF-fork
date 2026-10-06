@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { CONFIG, DEFAULT_CONFIG } from '../src/config';
 import { rebuildRules } from '../src/match/engine';
-import { adaptHomeRender } from '../src/home-grid';
+import { adaptHomeRender, resetHomeComponentTree } from '../src/home-grid';
 const video = { name: 'BiliVideoCard' };
 const floor = {};
 const node = (type: any, props: any = {}, children: any = null) => ({ __v_isVNode: true, type, props, children, patchFlag: 64, dynamicChildren: ['old'], key: props.key });
@@ -48,5 +48,21 @@ describe('首页渲染模型适配', () => {
     const root = node('div', {}, [bone(), anchor()]);
     CONFIG.enabled = false; expect(adaptHomeRender(root)).toBe(root);
     CONFIG.enabled = true; CONFIG.reviewMode = true; expect(adaptHomeRender(root)).toBe(root);
+  });
+  it('刷新只替换原生推荐组件的 key，保留类型/props/ref，并在首次 render 前装上过滤', () => {
+    const type={__name:'RecommendContainer_FloorAside'};let original=0,filter=0;
+    const props={ref:'original',onVnodeBeforeMount:()=>{original++;}};
+    const home={...node(type,props),component:{old:true},el:{old:true},ref:'vnode-ref'};
+    const unrelated=node({__name:'Header'});
+    const out=resetHomeComponentTree(node('div',{},[unrelated,home]),2,()=>{filter++;});
+    expect(out.children[0]).toBe(unrelated);expect(out.children[1].type).toBe(type);expect(out.children[1].ref).toBe('vnode-ref');
+    expect(out.children[1].key).toContain('bfb-home:2');expect(out.children[1].component).toBeNull();expect(home.component).toEqual({old:true});
+    out.children[1].props.onVnodeBeforeMount(out.children[1]);expect(original).toBe(1);expect(filter).toBe(1);
+  });
+  it('父组件稳定插槽缓存不能复用上一推荐批次，不提前执行插槽', () => {
+    let calls=0;const slot=Object.assign(()=>{calls++;return[node({__name:'RecommendContainer_Overseas'})];},{_c:true});
+    const out=resetHomeComponentTree(node({}, {}, {default:slot,_:1,$stable:true}),3,()=>{});
+    expect(calls).toBe(0);expect(out.children._).toBe(2);expect(out.children.default._c).toBe(true);
+    expect(out.children.default()[0].key).toContain('bfb-home:3');expect(calls).toBe(1);
   });
 });

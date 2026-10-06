@@ -35,8 +35,8 @@ src/
 ├─ shadow.ts            开放 shadowRoot 注册表（评论/卡片穿透用）
 ├─ gm.ts                GM_xmlhttpRequest 的唯一出口（补 withCredentials 类型；环境不支持时返回 false）
 ├─ batch.ts             名单批量解析 parseNameList（粘贴的 UID/UP名 → 两组）
-├─ json-span.ts         已验证 JSON 的属性值文本定位；PiliNara 旧名单保留原顺序/原名字并末尾追加
-├─ webdav-directory.ts  DAV XML 目录解析、仓库 URL 归一化、同源与目录范围校验
+├─ json-span.ts         已验证 JSON 的属性值文本定位；PiliPlus 旧名单保留原顺序/原名字并末尾追加
+├─ webdav-directory.ts  DAV XML 目录解析、仓库 URL 归一化、自定义文件/目录路径与同源范围校验
 ├─ match/normalize.ts   文本归一 + 规则行编译 + 作用域关键词 + splitRuleInput（fuzzy 注入）
 ├─ subscriptions/parse.ts  订阅文本解析（JSON / uBlock 文本双格式）
 ├─ ui/hooks.ts          UI 回调注入桥（低层模块经它回调面板，避免 import 面板成环）
@@ -45,7 +45,7 @@ src/
 │
 │  ── L1~L3 状态 / 数据 / 副作用 ──
 ├─ config.ts            AppConfig 类型 + CONFIG 单例 + 存取/合并/导入导出（deepMerge 原型链防护）
-├─ webdav.ts            仓库目录/凭据隔离 + 自动建备份目录 + PiliNara 文件发现与去重追加
+├─ webdav.ts            凭据隔离 + 自动建备份目录 + PiliPlus 自定义路径/独立登录/去重追加
 ├─ metadata-cache.ts    页面原生响应的精简被动缓存：有界、过期清理、跨页持久化，无主动请求
 ├─ request-budget.ts    补充取数预算：跨页共享 6 次/分钟、60 次/24小时
 ├─ logging.ts           log / logErr / safe（错误边界）+ BADGE（传函数即惰性求值）
@@ -62,8 +62,8 @@ src/
 ├─ comment-data.ts      评论响应列表过滤：父回复索引、置顶双副本、白名单、保留原始分页
 ├─ initial-data.ts      SSR 首屏：raw/head、搜索/投稿预览、hydrate 接管、Pinia shallowRef、有界等待
 ├─ initial-search.ts    视频搜索本地副本：经原生 submitSearch 一次回放同页 SSR 结果，不额外请求
-├─ home-refresh.ts      原“换一换”调用 B站原生完整刷新；有限分发防滚动，过时在途批次不能回填
-├─ home-grid.ts         原生首页 Vue 渲染适配：DOM patch 前剪枝、原生骨架补占位、规则变更重判
+├─ home-refresh.ts      原生 WEB Change 刷新/空批次用户分页、布局锚定保护、旧延迟分页取消
+├─ home-grid.ts         原生 Vue 渲染剪枝/骨架适配、推荐组件换 key 重建原站分页与哨兵
 │
 │  ── L4~L5 领域 / DOM ──
 ├─ rules.ts             规则增删统一入口 addToList/removeFromList/pushUnique（改完发 events）
@@ -108,7 +108,8 @@ L5        api · rules · subscriptions/refresh · comments · rulehealth（net-
 L5.1      video-filter · comment-data
 L5.2      net
 L5.3      initial-data · initial-search（回放助手无内部依赖）
-L5.4      home-refresh · home-grid
+L5.4      home-grid
+L5.5      home-refresh
 L6        ui/field · blacklist · dom
 L6.5      scanner（依赖 dom/shadow/logging；无人依赖它，仅 main 启动）
 L7        ui/menu
@@ -185,7 +186,7 @@ L9        main（bootstrap，装配一切）
 | 风控/限速 | `api.ts`（riskGuard、队列） |
 | 预置词库 | `presets.ts` |
 | 订阅格式/刷新 | `subscriptions/{parse,store,refresh}.ts` |
-| WebDAV 配置备份 / PiliNara 自动发现 | `webdav.ts`（网络/清洗）+ `webdav-directory.ts`（DAV XML/范围校验）+ `json-span.ts`（名单文本保留）+ `ui/panel/sections/webdav.ts`（交互） |
+| WebDAV 配置备份 / PiliPlus 路径与独立登录 | `webdav.ts`（网络/清洗）+ `webdav-directory.ts`（DAV XML/路径/范围校验）+ `json-span.ts`（名单文本保留）+ `ui/panel/sections/webdav.ts`（交互） |
 | 角标/提示文案 | `ui/toast.ts` |
 | 启动顺序/事件接线 | `main.ts` |
 | 什么时候扫描（首屏不闪 / 滚动节流） | `scanner.ts`（策略 `createScanScheduler` 可单测；扫描**内容**在 `dom.ts`） |
@@ -234,9 +235,10 @@ npm test           # vitest 纯逻辑单测
 - 可选补充取数使用 `api.ts` 的 1 并发、至少 1 秒间隔、缓存与风控熔断，另受跨页共享 6 次/分钟、60 次/24小时预算约束。整批最多等待 8 秒；过期或已关闭开关的排队任务不能继续发请求。用户明确发起的账号黑名单操作仍可联网，不能把它当后台自动补齐。
 - 元数据缓存最多 1800 项，视频 7 天/UP 1 天过期；只保存白名单字段，不存 Cookie、完整响应、播放进度等个人状态，不进入配置备份。补充取数授权属于 `NON_PORTABLE`，导入/云端恢复不能替用户开启它。
 - 超时/熔断的本批结论为临时放行：迟到元数据不能隐藏已经显示的卡片；下一批响应可用新缓存重新判定。配置版本变化不能复用旧结论。
-- 首页完整刷新复用 B站 `.flexible-roll-btn-inner` 的原生 Refresh（实测 `fresh_type=5, fetch_row=1`），不复制 BewlyCat UI、不重签/修改请求；该入口缺失时整页刷新。刷新前在途旧批次清空返回列表，防止无限滚动旧结果回填。
-- 原生 Refresh 的按钮与推荐组件同步调用两次 `window.scrollTo(0, 0)`。仅在此次刷新分发内暂时屏蔽页面的 `scroll/scrollTo/scrollBy`，转发入口用 `finally` 恢复，原生入口保留当前事件并在下一任务恢复；不得对正在执行 click 的同一元素再调用 click，也不得长期锁定页面滚动、改写独立回顶部按钮或覆盖其他扩展新装的方法。
-- 首页渲染适配只处理已识别的原生推荐组件。保留节点 key、ref、滚动观察锚点和响应式样式，不改全站布局；Vue 编译后的稳定 slot 必须转为动态 slot，避免旧占位被 slot 缓存继续复用。DOM 复用成 skeleton 时只撤销本插件自己的隐藏和标记。
+- 首页完整换新直接调用页面真实 Pinia store 的 `getHead(getPsParams(3))`，使用 WEB Change=3，不发布会回顶的 Refresh=5 事件。由原站追加登录 Cookie/WBI/曝光/点击/uniq_id，不自行建匿名或 App 请求，也不重置 fresh_idx/曝光历史。没有受支持的 store/组件时只能整页正常刷新；请求失败保持页面并报错，不切换推荐源。
+- 新响应到达后只为原生推荐组件换 key，清除旧私有分页列表并重建原站加载哨兵。旧在途成功或错误响应一律 AbortError 取消；原生延迟分页在换新期间或没有推荐内容时，在 updateParams 推进前取消，不能让旧行号继续发请求。整批被过滤只在用户明确向下浏览时通过原站 WEB DropDown=4 请求一次，不自动循环补满。
+- 替换期间临时关闭 root/body 滚动锚定，保护 ClientOnly 跨帧挂载造成的高度收缩；挂载后恢复本插件设置的 CSS 原值/优先级。不得长期改写全局 scroll/scrollTo/scrollBy、强拉滚动、复制站点 UI。原生新哨兵可以通过不移动位置的 scroll 事件重检查，避免请求期间滚动被遗漏。
+- 首页渲染适配只处理已识别的原生推荐组件。保留原生类型/props/ref/观察锚点，只有明确刷新时替换推荐组件 key；Vue 稳定 slot 必须转动态，避免旧占位与旧分页被缓存复用。DOM 复用成 skeleton 时只撤销本插件自己的隐藏和标记。
 - 自检在原生请求仍在下载或过滤时不得提前报警；真实下载失败、结构失配仍须可观察。
 
 - **不要改 `constants.ts` 的 `STORE_KEY`**（会丢老用户本地配置）。
@@ -251,7 +253,7 @@ npm test           # vitest 纯逻辑单测
 - 第三方致谢集中在 README，勿散落代码注释。
 - **安全红线**（0.0.6 起）：`@connect` 只声明已知域（B 站、常见 CDN、坚果云 WebDAV），不留 `*`；其他 WebDAV 域名由管理器按域授权，不因通用性直接授予所有网站权限。配置**导出与导入都剔除 `NON_PORTABLE`**（尤其 `subscriptions`，防分享文件注入自动联网 URL）；订阅/导入的 `/正则/` 受 `MAX_REGEX_LEN` 长度上限保护（防 ReDoS）。
 - **不可信配置必须过 `sanitizeConfigInput`**（0.0.8 起）：导入路径按 `DEFAULT_CONFIG` 的形状清洗，未知键 / 类型不符的值 / 数组里的非字符串元素一律丢弃。它**只用于导入，不用于 `loadConfig`**——`DEFAULT_CONFIG.uidNames` 是 `{}`、`subscriptions` 是 `[]`，拿它们当类型参照会把用户已存的缓存与订阅全部清空。已落盘的坏配置由消费侧的 `match/normalize.ruleLines` 兜底（规则数组的唯一入口）。
-- **WebDAV 凭据隔离**：界面仅需仓库目录 URL、用户名、密钥；自动在其下创建 `biliHoyoFairy-MX703/config.json`。地址、用户名和密码只写 `WEBDAV_SETTINGS_KEY`，不得进入 `CONFIG`、普通导出、订阅或远端备份正文；下载的备份与本地文件导入一样，必须先迁移、清洗并剔除 `NON_PORTABLE`。目录发现只允许仓库同源、直接子项，拒绝跨域/越界 DAV href。PiliNara 多设备文件必须选择目标，不自动覆盖第一项。
+- **WebDAV 凭据隔离**：本插件备份仍只需仓库目录 URL、用户名、密钥，在其下创建 `biliHoyoFairy-MX703/config.json`。PiliPlus 可填仓库内文件路径，目录默认手机 JSON，留空自动识别直接 PiliPlus 目录。默认共用本插件服务，独立登录开关打开后才使用另一套凭据；关闭时隐藏独立字段且不使用其内容。两套地址/凭据/路径只写 `WEBDAV_SETTINGS_KEY`，不进入 CONFIG、普通导出、订阅或备份正文。拒绝越界 href/路径/重定向，多设备自动发现必须手动选择。
 - **WebDAV 域名授权**：填写和保存不联网；明确点击“测试连接”后先发无凭据、无 Cookie 的 `PROPFIND Depth:0`，交由脚本管理器处理目标域名权限。探测收到 401/403 只代表可达，随后带凭据的目录读取才判断认证成功；任何网络/权限失败不得继续发认证请求。测试全程只读，不 MKCOL/PUT。网络错误提示实际域名，请求拒绝重定向，插件不代替用户批准管理器权限。
-- **PiliNara 只合并 UID**：写入前读完整文件，以远端 `localCache.recommendBlockedMids` 为基准去重并在末尾追加缺少项；保留原名单的文本顺序、名字及未知项，其他配置语义不变。没有新增项就不 PUT；有 ETag 时用 `If-Match` 防止并发静默覆盖；不能把 BV/AV 或账号 `blackMids` 写进推荐名单。
+- **PiliPlus 只合并 UID**：识别 Hive 实际导出的小写 `localcache`，兼容 `localCache`；同时存在时以小写为准但另一字段原样保留。写入前读完整文件，以远端 recommendBlockedMids 去重并末尾追加，只替换其 JSON 文本片段，其他字段连格式/大整数都保持原样。没有新增不 PUT；有 ETag 带 If-Match；不写 BV/AV 或账号 blackMids。旧客户端未导出缓存时明确拒绝同步并提示重新备份。
 - **账号写操作红线**：单条拉黑（右键/悬停）执行前必须二次确认；批量拉黑必须可停止、限速、风控自动退避；`doBlacklistMany` 批量本地屏蔽统一一次 `saveConfig+emitRulesChanged`（勿逐条重扫）。

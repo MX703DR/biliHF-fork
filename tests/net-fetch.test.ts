@@ -59,7 +59,19 @@ describe('fetch 响应契约', () => {
     const h = setup(response({ code: 0, data: { item: [{ title: '旧批次' }] } }));
     const rcmd = 'https://api.bilibili.com/x/web-interface/wbi/index/top/feed/rcmd?fetch_row=4&w_rid=unchanged';
     const old = h.W.fetch(rcmd); advanceHomeFeedEpoch();
-    expect((await (await old).json()).data.item).toEqual([]);
+    await expect(old).rejects.toMatchObject({ name: 'AbortError' });
     const fresh = await h.W.fetch(rcmd); expect((await fresh.json()).data.item).toEqual([{ title: '旧批次' }]);
+  });
+  it('旧风控/结束响应也取消，不能污染新组件的分页状态', async () => {
+    const h = setup(response({ code: 62011, message: 'no more' }));
+    const p = h.W.fetch('https://api.bilibili.com/x/web-interface/wbi/index/top/feed/rcmd?fresh_type=4');
+    advanceHomeFeedEpoch(); await expect(p).rejects.toMatchObject({ name: 'AbortError' });
+  });
+  it('WEB 登录请求的 URL、Request、凭据和自定义头原样送到原生 fetch', async () => {
+    const h = setup(response({ code: 0, data: { item: [] } }));
+    const u = 'https://api.bilibili.com/x/web-interface/wbi/index/top/feed/rcmd?fresh_type=3&uniq_id=keep&w_rid=signed';
+    const init = { credentials: 'include' as const, headers: { 'X-Session-Test': 'keep' } };
+    await h.W.fetch(u, init); expect(h.fetch.mock.calls[0]).toEqual([u, init]);
+    const r = new Request(u, { credentials: 'include' }); await h.W.fetch(r); expect(h.fetch.mock.calls[1][0]).toBe(r);
   });
 });

@@ -1,146 +1,106 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { beginHomeRefreshScrollGuard, createHomeRefreshHandler, withoutHomeRefreshScroll } from '../src/home-refresh';
-function harness() {
-  const button = { disabled: false };
-  let enabled = true, home = true, loading = false, now = 0;
-  let refresh: any = { click: vi.fn() };
-  const reload = vi.fn(); const timers: (() => void)[] = [];
-  const event = { button: 0, target: { closest: (selector: string) => selector === '.roll-btn' ? button : null }, preventDefault: vi.fn(), stopImmediatePropagation: vi.fn() };
-  const handler = createHomeRefreshHandler({ enabled: () => enabled, isHome: () => home, fullRefresh: () => refresh, loading: () => loading, reload, now: () => now, later: (f) => timers.push(f) });
-  return { button, event, reload, handler, click: () => handler(event as any), refresh: () => refresh, disable: () => { enabled = false; }, elsewhere: () => { home = false; }, loading: (v: boolean) => { loading = v; }, noRefresh: () => { refresh = null; }, advance: (ms: number) => { now += ms; timers.splice(0).forEach((f) => f()); } };
+import { describe, expect, it, vi } from 'vitest';
+import { beginHomeRefreshLayoutGuard, createHomeRefreshHandler, guardNativeWebPaging, hasNativeHomeContent, isHomeBrowsingInput, replaceNativeWebFeed } from '../src/home-refresh';
+
+const tick = async () => { for (let i=0; i<8; i++) await Promise.resolve(); };
+function harness(selector='.roll-btn') {
+  const button={disabled:false}; let enabled=true, home=true, loading=false;
+  let done!: (v:boolean)=>void;
+  const refresh=vi.fn(()=>new Promise<boolean>(resolve=>{done=resolve;}));
+  const reload=vi.fn(), failed=vi.fn();
+  const event={button:0,target:{closest:(s:string)=>s===selector?button:null},preventDefault:vi.fn(),stopImmediatePropagation:vi.fn()};
+  const handler=createHomeRefreshHandler({enabled:()=>enabled,isHome:()=>home,loading:()=>loading,refresh,reload,failed});
+  return {button,event,handler,refresh,reload,failed,click:()=>handler(event as any),finish:(v=true)=>done(v),
+    disable:()=>{enabled=false;},elsewhere:()=>{home=false;},loading:()=>{loading=true;}};
 }
-describe('首页换一换：复用原生完整刷新', () => {
-  it('拦住两行刷新，只点击一次原生“刷新内容”，保留按钮和布局', () => {
-    const h = harness(); h.click(); expect(h.refresh().click).toHaveBeenCalledOnce(); expect(h.event.stopImmediatePropagation).toHaveBeenCalledOnce(); expect(h.button.disabled).toBe(true);
-    h.click(); expect(h.refresh().click).toHaveBeenCalledOnce(); h.advance(700); expect(h.button.disabled).toBe(false);
+describe('首页换一换：原站 WEB 登录推荐',()=>{
+  it('面板/插件菜单/确认弹窗内部滚动或已被处理的操作不能触发推荐加载',()=>{
+    const inside={defaultPrevented:false,target:{closest:()=>({})}};
+    expect(isHomeBrowsingInput(inside as any)).toBe(false);
+    expect(isHomeBrowsingInput({defaultPrevented:true,target:null} as any)).toBe(false);
+    expect(isHomeBrowsingInput({defaultPrevented:false,target:{closest:()=>null}} as any)).toBe(true);
   });
-  it('在加载中不会重复提交刷新', () => { const h = harness(); h.loading(true); h.click(); expect(h.refresh().click).not.toHaveBeenCalled(); });
-  it('不是首页或插件暂停时不干涉站点事件', () => {
-    for (const mode of ['disable', 'elsewhere'] as const) { const h = harness(); h[mode](); h.click(); expect(h.event.preventDefault).not.toHaveBeenCalled(); }
+  it('两个刷新入口只提交一次，按钮等待异步完成后恢复',async()=>{
+    for(const selector of ['.roll-btn','.flexible-roll-btn-inner']){
+      const h=harness(selector);h.click();h.click();await tick();expect(h.refresh).toHaveBeenCalledOnce();
+      expect(h.event.stopImmediatePropagation).toHaveBeenCalledTimes(2);if(selector==='.roll-btn')expect(h.button.disabled).toBe(true);
+      h.finish();await tick();expect(h.button.disabled).toBe(false);expect(h.reload).not.toHaveBeenCalled();
+    }
   });
-  it('找不到原生完整刷新入口，安全降级为整页刷新而不是只改 DOM', () => { const h = harness(); h.noRefresh(); h.click(); expect(h.reload).toHaveBeenCalledOnce(); });
-  it('异常和超长加载不会把按钮永久锁死', () => {
-    const h = harness(); h.click(); h.loading(true); h.advance(20000); expect(h.button.disabled).toBe(false);
+  it('加载中拒绝连点，不是首页/暂停/非左键/无关入口则完全放行',async()=>{
+    const h=harness();h.loading();h.click();await tick();expect(h.refresh).not.toHaveBeenCalled();
+    for(const mode of ['disable','elsewhere'] as const){const v=harness();v[mode]();v.click();expect(v.event.preventDefault).not.toHaveBeenCalled();}
+    const v=harness();v.handler({...v.event,button:1} as any);v.handler({...v.event,target:{closest:()=>null}} as any);
+    expect(v.event.preventDefault).not.toHaveBeenCalled();
   });
-});
-
-describe('首页刷新只屏蔽原生分发中的自动滚动', () => {
-  it('屏蔽原生两次回顶部和同步 scroll/scrollBy，分发后手动滚动仍有效', () => {
-    const host = { scrollTo: vi.fn(), scroll: vi.fn(), scrollBy: vi.fn() };
-    const before = Object.getOwnPropertyDescriptors(host);
-    withoutHomeRefreshScroll(host, () => { host.scrollTo(0, 0); host.scrollTo(0, 0); host.scroll(0, 300); host.scrollBy(0, 300); });
-    expect(host.scrollTo).not.toHaveBeenCalled(); expect(host.scroll).not.toHaveBeenCalled(); expect(host.scrollBy).not.toHaveBeenCalled();
-    expect(Object.getOwnPropertyDescriptors(host)).toEqual(before);
-    host.scrollTo(0, 0); expect(host.scrollTo).toHaveBeenCalledOnce();
+  it('缺失受支持的原站 store/组件时只能整页刷新，不回退到匿名或 App API',async()=>{
+    const h=harness();h.click();await tick();h.finish(false);await tick();expect(h.reload).toHaveBeenCalledOnce();
   });
-  it('原生刷新抛错时也恢复方法，包括继承方法与可配置 getter', () => {
-    const original = vi.fn(); const host = Object.create({ scroll: original, scrollBy: original });
-    Object.defineProperty(host, 'scrollTo', { configurable: true, get: () => original });
-    const descriptor = Object.getOwnPropertyDescriptor(host, 'scrollTo');
-    expect(() => withoutHomeRefreshScroll(host, () => { throw new Error('refresh failed'); })).toThrow('refresh failed');
-    expect(Object.getOwnPropertyDescriptor(host, 'scrollTo')).toEqual(descriptor);
-    expect(Object.prototype.hasOwnProperty.call(host, 'scroll')).toBe(false); expect(Object.prototype.hasOwnProperty.call(host, 'scrollBy')).toBe(false);
-  });
-  it('不强行改只读 API，也不覆盖同步回调中其他扩展的新实现', () => {
-    const readonly = vi.fn(), next = vi.fn(); const host = { scroll: vi.fn(), scrollBy: vi.fn() } as any;
-    Object.defineProperty(host, 'scrollTo', { value: readonly, writable: false, configurable: false });
-    withoutHomeRefreshScroll(host, () => { host.scrollTo(0, 0); host.scroll = next; });
-    expect(host.scrollTo).toBe(readonly); expect(readonly).toHaveBeenCalledOnce(); expect(host.scroll).toBe(next);
-  });
-  it('原生“刷新内容”保留当前分发、不嵌套 click；下一任务恢复滚动，只推进一次批次', () => {
-    const host = { scrollTo: vi.fn(), scroll: vi.fn(), scrollBy: vi.fn() }, epoch = vi.fn();
-    const originalScrollTo = host.scrollTo;
-    const timers: Array<{ callback: () => void; delay: number }> = [];
-    const event = { button: 0, target: { closest: (selector: string) => selector === '.flexible-roll-btn-inner' ? refresh : null }, preventDefault: vi.fn(), stopImmediatePropagation: vi.fn() };
-    const refresh = { click: vi.fn() };
-    const handler = createHomeRefreshHandler({ enabled: () => true, isHome: () => true, fullRefresh: () => null, loading: () => false,
-      reload: vi.fn(), now: () => 0, later: (callback, delay) => timers.push({ callback, delay }), onFullRefresh: epoch,
-      guardNativeScroll: () => beginHomeRefreshScrollGuard(host) });
-    handler(event as any);
-    expect(event.stopImmediatePropagation).not.toHaveBeenCalled(); expect(refresh.click).not.toHaveBeenCalled();
-    host.scrollTo(0, 0); host.scrollTo(0, 0); expect(originalScrollTo).not.toHaveBeenCalled();
-    handler(event as any); expect(epoch).toHaveBeenCalledOnce(); expect(event.stopImmediatePropagation).toHaveBeenCalledOnce();
-    expect(timers.map(x => x.delay)).toEqual([0, 100]); timers[0].callback();
-    host.scrollTo(0, 0); expect(host.scrollTo).toHaveBeenCalledOnce();
-  });
-  it('转发换一换也使用防滚动保护，非左键和无关按钮不受影响', () => {
-    const guard = vi.fn((action: () => void) => action()); const refresh = { click: vi.fn() };
-    const button = { disabled: false };
-    const event = { button: 0, target: { closest: (selector: string) => selector === '.roll-btn' ? button : null }, preventDefault: vi.fn(), stopImmediatePropagation: vi.fn() };
-    const handler = createHomeRefreshHandler({ enabled: () => true, isHome: () => true, fullRefresh: () => refresh as any, loading: () => false,
-      reload: vi.fn(), now: () => 0, later: vi.fn(), withoutScroll: guard });
-    handler({ ...event, button: 1 } as any); expect(guard).not.toHaveBeenCalled();
-    handler({ ...event, target: { closest: () => null } } as any); expect(guard).not.toHaveBeenCalled();
-    handler(event as any); expect(guard).toHaveBeenCalledOnce(); expect(refresh.click).toHaveBeenCalledOnce();
+  it('请求失败保留页面，不自动再请求、回顶或重载',async()=>{
+    const h=harness();h.refresh.mockRejectedValue(new Error('network'));h.click();await tick();
+    expect(h.failed).toHaveBeenCalledOnce();expect(h.reload).not.toHaveBeenCalled();expect(h.button.disabled).toBe(false);
   });
 });
 
-import { CONFIG, DEFAULT_CONFIG } from '../src/config';
-import { rebuildRules } from '../src/match/engine';
-import { filterInitialState, initialVideoLists, unwrapState } from '../src/initial-data';
-import { normFeedItem } from '../src/cardinfo';
-import { blockedLog } from '../src/stats';
-import { health } from '../src/health';
-beforeEach(() => { Object.assign(CONFIG, structuredClone(DEFAULT_CONFIG)); rebuildRules(); });
-describe('SSR 首屏数据', () => {
-  it('支持原始和转换后两份 Pinia 列表，UID/点赞数不因转换而丢失', () => {
-    const raw = { bvid: 'BV1initial', title: '视频', owner: { mid: 9, name: 'UP' }, stat: { like: 4 } };
-    const head = { bvid: raw.bvid, title: raw.title, author: raw.owner, stats: raw.stat, isAd: false };
-    expect(normFeedItem(head)).toMatchObject({ uid: '9', up: 'UP', likes: 4, isAd: false });
-    CONFIG.block.uids.push('9'); rebuildRules(); const before = blockedLog.length;
-    const state = { feed: { data: { recommend: { item: [raw] }, head: { recommend: [head] } } }, carousel: { item: [raw] }, videoData: raw };
-    expect(filterInitialState(state)).toBe(2); expect(blockedLog.length - before).toBe(1);
-    expect(state.feed.data.head.recommend).toHaveLength(0); expect(state.carousel.item).toHaveLength(1); expect(state.videoData).toBe(raw);
+function feedHarness(empty=false){
+  const feed:any={data:{recommend:{item:[]},head:{recommend:[]}},fetch_row:10,noMoreFeed:true,
+    fresh_idx:7,fresh_idx_1h:8,brush:{refresh:3},feedReqCardList:['exposure'],clicks:['click'],uniq_id:'same-session',
+    initRequest:vi.fn(async()=>{}),getPsParams:vi.fn(()=>({ps:10,domestic_zh_ps:10,overseas_other_ps:15})),
+    getHead:vi.fn(async()=>{feed.data.recommend={item:empty?[]:[{title:'新推荐'}]};feed.data.head.recommend=empty?[]:[{title:'新推荐'}];})};
+  const deps={reset:vi.fn(async()=>{}),advance:vi.fn(),afterPaint:vi.fn(async()=>{})};return{feed,deps};
+}
+describe('原站 WEB 推荐会话和原生分页重建',()=>{
+  it('仅剩游客登录提示不是推荐内容，但不从原数组删除提示；未知卡片类型保持放行',()=>{
+    const head=[{goto:'login_card',title:''}];const feed={data:{head:{recommend:head}}};expect(hasNativeHomeContent(feed)).toBe(false);expect(head).toHaveLength(1);
+    head.push({goto:'future_content',title:''});expect(hasNativeHomeContent(feed)).toBe(true);
+    expect(hasNativeHomeContent({data:{head:{recommend:[]}}})).toBe(false);expect(hasNativeHomeContent(null)).toBe(false);
   });
-  it('hydrate 后通过 ref.value 取得响应式数组，而非操作脱钩的旧副本', () => {
-    const list = [{ title: '屏蔽词', bvid: 'BV1ref' }];
-    const ref = { __v_isRef: true, value: { recommend: { item: list }, head: { recommend: list } } };
-    const state = { feed: { data: ref } };
-    expect(unwrapState(ref)).toBe(ref.value); expect(initialVideoLists(state)).toEqual([list]);
-    CONFIG.block.keywords.push('屏蔽词'); rebuildRules(); expect(filterInitialState(state)).toBe(1); expect(list).toHaveLength(0);
+  it('刷新中或全过滤时阻止原生延迟分页，不推进会话或发请求；只包装一次',()=>{
+    let suspended=true;const original=vi.fn();const feed={updateParams:original};guardNativeWebPaging(feed,()=>suspended);const wrapper=feed.updateParams;
+    guardNativeWebPaging(feed,()=>false);expect(feed.updateParams).toBe(wrapper);
+    expect(()=>feed.updateParams(4)).toThrow('paging is suspended');expect(original).not.toHaveBeenCalled();expect(feed.updateParams(3)).toBeUndefined();
+    suspended=false;feed.updateParams(4);expect(original.mock.calls).toEqual([[3],[4]]);
   });
-  it('搜索/视频页只处理显式的列表字段，不递归破坏播放数据', () => {
-    CONFIG.block.bvids.push('BV1current'); rebuildRules();
-    const state = { videoData: { bvid: 'BV1current', title: '当前视频' }, related: [{ bvid: 'BV1current', title: '推荐' }] };
-    expect(filterInitialState(state)).toBe(1); expect(state.videoData.bvid).toBe('BV1current');
+  it('只请求原站 Change=3，保留列/地区参数和推荐会话；仅重置楼层行号',async()=>{
+    const h=feedHarness();const exposed=h.feed.feedReqCardList,brush=h.feed.brush;
+    await replaceNativeWebFeed(h.feed,h.deps);
+    expect(h.feed.getHead).toHaveBeenCalledExactlyOnceWith({ps:10,domestic_zh_ps:10,overseas_other_ps:15,fresh_type:3,fetch_row:1});
+    expect(h.feed.fetch_row).toBe(1);expect(h.feed.noMoreFeed).toBe(false);expect(h.feed.fresh_idx).toBe(7);expect(h.feed.fresh_idx_1h).toBe(8);
+    expect(h.feed.feedReqCardList).toBe(exposed);expect(h.feed.brush).toBe(brush);expect(h.feed.uniq_id).toBe('same-session');expect(h.feed.clicks).toEqual(['click']);
+    expect(h.deps.advance).toHaveBeenCalledOnce();expect(h.deps.reset).toHaveBeenCalledOnce();expect(h.deps.afterPaint).toHaveBeenCalledOnce();
   });
-  it('审查模式和停用时不删除首屏列表', () => {
-    CONFIG.reviewMode = true; CONFIG.block.keywords.push('屏蔽词'); rebuildRules();
-    const state = { videoList: [{ title: '屏蔽词' }] }; expect(filterInitialState(state)).toBe(0); expect(state.videoList).toHaveLength(1);
+  it('用户向下浏览空批次时请求 WEB DropDown=4，并保留游标推进而非重置推荐会话',async()=>{
+    const h=feedHarness();await replaceNativeWebFeed(h.feed,h.deps,true);
+    expect(h.feed.getHead.mock.calls[0][0]).toMatchObject({fresh_type:4,fetch_row:13});expect(h.feed.fetch_row).toBe(10);expect(h.deps.advance).not.toHaveBeenCalled();
   });
-  it('首屏自检计数合并所有已知列表，同 BV 的 raw/head 副本不重复计数', () => {
-    const raw = [{ bvid: 'BV1first', title: '一' }, { bvid: 'BV1second', title: '二' }];
-    const state = { feed: { data: { recommend: { item: raw }, head: { recommend: structuredClone(raw) } } }, videoList: [{ bvid: 'BV1third', title: '三' }] };
-    const before = { items: health.initialItems, kept: health.initialKept };
-    expect(filterInitialState(state)).toBe(0);
-    expect(health.initialItems - before.items).toBe(3); expect(health.initialKept - before.kept).toBe(3);
+  it('原站吞掉网络错误但没有新响应时拒绝重建，也不尝试匿名或 App',async()=>{
+    const h=feedHarness();h.feed.getHead.mockImplementation(async()=>{});const previous=h.feed.data.recommend;
+    await expect(replaceNativeWebFeed(h.feed,h.deps)).rejects.toThrow('未切换匿名或 App');expect(h.feed.data.recommend).toBe(previous);expect(h.deps.reset).not.toHaveBeenCalled();
   });
-  it('综合搜索的 Pinia 分组与用户投稿预览都在 hydrate 前过滤，保留用户及分页', () => {
-    CONFIG.block.keywords.push('屏蔽词'); rebuildRules();
-    const user = { mid: 9, uname: 'UP', res: [{ bvid: 'BV1preview', title: '屏蔽词' }, { bvid: 'BV1keep', title: '保留' }] };
-    const data = { page: 2, numResults: 100, result: [
-      { result_type: 'bili_user', data: [user] },
-      { result_type: 'video', data: [{ bvid: 'BV1search', title: '<em>屏蔽词</em>' }] },
-      { result_type: 'media_bangumi', data: [{ title: '屏蔽词' }] },
-    ] };
-    const state = { searchResponse: { searchAllResponse: { __v_isRef: true, value: data } } };
-    expect(filterInitialState(state)).toBe(2);
-    expect(user.res.map((x) => x.bvid)).toEqual(['BV1keep']);
-    expect(data.result[0].data[0]).toBe(user); expect(data.result[1].data).toHaveLength(0);
-    expect(data.result[2].data).toHaveLength(1); expect(data.page).toBe(2); expect(data.numResults).toBe(100);
+  it('全被过滤时重建也不发 Init；重建完成或异常都恢复原 initRequest',async()=>{
+    const h=feedHarness(true);const init=h.feed.initRequest;
+    h.deps.reset.mockImplementation(async()=>{await h.feed.initRequest();});await replaceNativeWebFeed(h.feed,h.deps);
+    expect(init).not.toHaveBeenCalled();expect(h.feed.initRequest).toBe(init);
+    h.deps.reset.mockRejectedValue(new Error('reset'));await expect(replaceNativeWebFeed(h.feed,h.deps)).rejects.toThrow('reset');expect(h.feed.initRequest).toBe(init);
   });
-  it('搜索投稿预览从用户卡片继承 UID，白名单不会因为预览缺 owner 而失效', () => {
-    CONFIG.block.keywords.push('屏蔽词'); CONFIG.allow.uids.push('9'); rebuildRules();
-    const previews = [{ bvid: 'BV1allowed', title: '屏蔽词' }];
-    const state = { searchResponse: { searchAllResponse: { result: [{ result_type: 'bili_user', data: [{ mid: 9, uname: 'UP', res: previews }] }] } } };
-    expect(filterInitialState(state)).toBe(0); expect(previews).toHaveLength(1);
-    expect(previews[0]).not.toHaveProperty('owner');
+});
+
+function style(){
+  const values=new Map<string,string>(),priorities=new Map<string,string>();
+  return{getPropertyValue:(n:string)=>values.get(n)||'',getPropertyPriority:(n:string)=>priorities.get(n)||'',
+    setProperty:(n:string,v:string,p='')=>{values.set(n,v);priorities.set(n,p);},removeProperty:(n:string)=>{values.delete(n);priorities.delete(n);}};
+}
+describe('刷新布局滚动锚定保护',()=>{
+  it('替换期间关闭根和 body 的锚定，恢复原值/优先级且可以重复恢复',()=>{
+    const a=style(),b=style();a.setProperty('overflow-anchor','auto');const restore=beginHomeRefreshLayoutGuard({documentElement:{style:a},body:{style:b}} as any);
+    expect(a.getPropertyValue('overflow-anchor')).toBe('none');expect(b.getPropertyPriority('overflow-anchor')).toBe('important');
+    restore();restore();expect(a.getPropertyValue('overflow-anchor')).toBe('auto');expect(a.getPropertyPriority('overflow-anchor')).toBe('');expect(b.getPropertyValue('overflow-anchor')).toBe('');
   });
-  it('视频搜索的 Pinia 单独列表可过滤，而用户搜索结果本身不当成视频删除', () => {
-    CONFIG.block.uids.push('9'); CONFIG.block.keywords.push('屏蔽词'); rebuildRules();
-    const state = { searchTypeResponse: { searchTypeResponse: { result: [{ type: 'video', bvid: 'BV1type', title: '屏蔽词' }] } } };
-    expect(filterInitialState(state)).toBe(1);
-    const users = { searchTypeResponse: { searchTypeResponse: { result: [{ type: 'bili_user', mid: 9, uname: 'UP' }] } } };
-    expect(filterInitialState(users)).toBe(0); expect(users.searchTypeResponse.searchTypeResponse.result).toHaveLength(1);
+  it('其他扩展替换的样式不被覆盖',()=>{
+    const a=style();const restore=beginHomeRefreshLayoutGuard({documentElement:{style:a}} as any);a.setProperty('overflow-anchor','auto','important');restore();expect(a.getPropertyValue('overflow-anchor')).toBe('auto');
+  });
+  it('为非零位置保留至少一屏高度，组件重新挂载后恢复原最小高度',()=>{
+    const a=style(),b=style();b.setProperty('min-height','80px');
+    const restore=beginHomeRefreshLayoutGuard({documentElement:{style:a},body:{style:b},defaultView:{scrollY:650,innerHeight:1080}} as any);
+    expect(b.getPropertyValue('min-height')).toBe('1730px');restore();expect(b.getPropertyValue('min-height')).toBe('80px');
   });
 });

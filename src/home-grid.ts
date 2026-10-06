@@ -8,6 +8,8 @@ import { logErr } from './logging';
 
 const NAMES = new Set(['RecommendContainer_FloorAside', 'RecommendContainer_Overseas']);
 const adapters = new Set<any>();
+const owners = new Map<any, { generation: number }>();
+let nativeVideoTemplate: any;
 const counted = new Set<string>();
 const hasClass = (node: any, name: string) => typeof node?.props?.class === 'string' && node.props.class.split(/\s+/).includes(name);
 // Vue 模板里的裸 Boolean 属性在 VNode 中是空字符串，不能按 truthy 判断。
@@ -87,6 +89,63 @@ export function adaptHomeRender(tree: any, videoTemplate?: any): any {
   return visit(tree);
 }
 
+/** 只为原生推荐组件换 key，卸载旧分页闭包、重建原站哨兵，不复制 UI 或 API。 */
+export function resetHomeComponentTree(tree: any, generation: number, beforeMount: (node: any) => void): any {
+  if (Array.isArray(tree)) return tree.map(node => resetHomeComponentTree(node, generation, beforeMount));
+  if (!tree || typeof tree !== 'object' || !tree.__v_isVNode) return tree;
+  if (NAMES.has(tree.type?.__name)) {
+    const original = tree.props?.onVnodeBeforeMount;
+    return { ...tree, key: `bfb-home:${generation}:${String(tree.key ?? tree.type.__name)}`,
+      props: { ...tree.props, onVnodeBeforeMount: (node: any, ...args: any[]) => {
+        if (Array.isArray(original)) original.forEach(fn => fn(node, ...args)); else original?.(node, ...args);
+        beforeMount(node);
+      } }, el: null, component: null, dynamicChildren: null, patchFlag: -2 };
+  }
+  if (Array.isArray(tree.children)) return cloneChildren(tree, resetHomeComponentTree(tree.children, generation, beforeMount));
+  if (tree.children && typeof tree.children === 'object') {
+    const slots = { ...tree.children };
+    for (const key of Object.keys(slots)) if (typeof slots[key] === 'function') {
+      const original = slots[key];
+      slots[key] = Object.assign((...args: any[]) => resetHomeComponentTree(original(...args), generation, beforeMount), original);
+    }
+    slots._ = 2; delete slots.$stable;
+    return cloneChildren(tree, slots);
+  }
+  return tree;
+}
+
+function attachRender(instance: any): void {
+  if (!instance || adapters.has(instance) || typeof instance.render !== 'function') return;
+  const original = instance.render;
+  instance.render = function (this: any, ...args: any[]) {
+    const tree = original.apply(this, args);
+    try { return adaptHomeRender(tree, nativeVideoTemplate); } catch (e) { logErr('首页渲染适配', e); return tree; }
+  };
+  adapters.add(instance);
+}
+
+function attachOwner(parent: any): void {
+  if (!parent || owners.has(parent) || typeof parent.render !== 'function' || typeof parent.proxy?.$forceUpdate !== 'function') return;
+  const state = { generation: 0 }; const original = parent.render;
+  parent.render = function (this: any, ...args: any[]) {
+    const tree = original.apply(this, args);
+    return state.generation ? resetHomeComponentTree(tree, state.generation, node => attachRender(node.component)) : tree;
+  };
+  owners.set(parent, state);
+}
+
+export function canResetHomeFeedView(): boolean { return [...owners.keys()].some(parent => !parent.isUnmounted); }
+
+export async function resetHomeFeedView(): Promise<void> {
+  const updates: Promise<unknown>[] = [];
+  for (const [parent, state] of owners) {
+    if (parent.isUnmounted) { owners.delete(parent); continue; }
+    state.generation++; parent.proxy.$forceUpdate(); updates.push(parent.proxy.$nextTick());
+  }
+  await Promise.all(updates);
+  for (const instance of adapters) if (instance.isUnmounted) adapters.delete(instance);
+}
+
 function attach(app: any): void {
   let videoTemplate: any;
   const instances: any[] = [];
@@ -102,14 +161,9 @@ function attach(app: any): void {
     if (Array.isArray(node.children)) node.children.forEach(walk);
   };
   walk(app?._container?._vnode);
+  nativeVideoTemplate ||= videoTemplate;
   for (const instance of instances) {
-    if (adapters.has(instance) || typeof instance.render !== 'function' || !videoTemplate) continue;
-    const original = instance.render;
-    instance.render = function (this: any, ...args: any[]) {
-      const tree = original.apply(this, args);
-      try { return adaptHomeRender(tree, videoTemplate); } catch (e) { logErr('首页渲染适配', e); return tree; }
-    };
-    adapters.add(instance);
+    attachOwner(instance.parent); attachRender(instance);
     instance.proxy?.$forceUpdate?.();
   }
 }

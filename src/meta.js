@@ -1,6 +1,6 @@
 // UserScript 元数据（构建产物的头部）。版本号单一来源在此处维护。
 // scripts/build.mjs 会把 banner 原样 prepend 到打包产物 biliHoyoFairy.user.js。
-export const version = '0.0.11';
+export const version = '0.0.12';
 
 export const banner = `// ==UserScript==
 // @name         biliHoyoFairy-MX703

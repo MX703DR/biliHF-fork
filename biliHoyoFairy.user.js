@@ -3,7 +3,7 @@
 // @name:zh-CN   biliHoyoFairy-MX703
 // @name:en      biliHoyoFairy-MX703
 // @namespace    https://github.com/MX703DR/biliHF-fork
-// @version      0.0.11
+// @version      0.0.12
 // @description  B站(bilibili/哔哩哔哩)推荐流净化与屏蔽脚本：屏蔽黑流量、引战视频、商业广告与不想看的 UP 主。支持按 标签/UP主/UID/关键词(可正则)/分区/时长/播放量/BV 精准过滤；覆盖首页/热门/排行榜/搜索/播放页/动态/评论区；白名单优先防误伤；右键一键屏蔽/拉黑(同步账号黑名单)；内置预置关键词库与规则订阅。
 // @description:en  Clean up & block the bilibili recommendation feed: hide clickbait, flame-bait, ads and unwanted UP owners. Filter by tag/UP/UID/keyword(regex)/category/duration/views/BV across home, popular, ranking, search, video, dynamic pages and comments; whitelist priority; one-click block synced to the account blacklist; preset keyword library and rule subscriptions.
 // @author       gendu-amd
@@ -2693,6 +2693,10 @@
         try {
           if (json) changed = filters.sync(target, json, context);
         } catch (e) {
+          if (e?.name === "AbortError") {
+            xhr.abort();
+            throw e;
+          }
         }
         commit(changed);
       };
@@ -2759,8 +2763,10 @@
               flush();
             }
           },
-          () => {
-            if (!closed) {
+          (error) => {
+            if (closed) return;
+            if (error?.name === "AbortError") xhr.abort();
+            else {
               commit(0);
               flush();
             }
@@ -2997,12 +3003,8 @@
   var homeRequestContext = (url) => RCMD_RE.test(url) && location.hostname === "www.bilibili.com" && location.pathname === "/" ? homeFeedEpoch : void 0;
   function discardStaleHomeFeed(json, context, note = true) {
     if (typeof context !== "number" || context === homeFeedEpoch) return null;
-    const arr = json?.code === 0 && json.data?.item;
-    if (!Array.isArray(arr)) return null;
-    if (note) health.feedParsed++;
-    const count = arr.length;
-    arr.length = 0;
-    return count;
+    if (note && json?.code === 0 && Array.isArray(json.data?.item)) health.feedParsed++;
+    throw new DOMException("Homepage recommendation generation changed", "AbortError");
   }
   NET.addPost(filterFeedJson, filterFeedJsonAsync);
   NET.addPost(filterCommentJson);
@@ -3318,123 +3320,11 @@
     }
   }
 
-  // src/home-refresh.ts
-  function beginHomeRefreshScrollGuard(host) {
-    const patches = [];
-    const restore = () => {
-      for (const { name, descriptor, noop } of patches.reverse()) {
-        if (host[name] !== noop) continue;
-        if (descriptor) Object.defineProperty(host, name, descriptor);
-        else Reflect.deleteProperty(host, name);
-      }
-      patches.length = 0;
-    };
-    try {
-      for (const name of ["scroll", "scrollTo", "scrollBy"]) {
-        if (typeof host[name] !== "function") continue;
-        const descriptor = Object.getOwnPropertyDescriptor(host, name);
-        if (descriptor && !descriptor.configurable && !descriptor.writable) continue;
-        const noop = () => {
-        };
-        Object.defineProperty(host, name, { value: noop, writable: true, enumerable: descriptor?.enumerable ?? true, configurable: descriptor?.configurable ?? true });
-        patches.push({ name, descriptor, noop });
-      }
-      return restore;
-    } catch (e) {
-      restore();
-      throw e;
-    }
-  }
-  function withoutHomeRefreshScroll(host, action) {
-    const restore = beginHomeRefreshScrollGuard(host);
-    try {
-      action();
-    } finally {
-      restore();
-    }
-  }
-  function createHomeRefreshHandler(deps) {
-    let busy = false;
-    let dispatching = false;
-    return (event) => {
-      if (dispatching) return;
-      if (!deps.enabled() || !deps.isHome() || event.button !== 0) return;
-      const target = event.target;
-      const nativeButton = target?.closest(HOME_FULL_REFRESH);
-      const button = target?.closest(HOME_ROLL_BUTTON);
-      if (!button && !nativeButton) return;
-      if (busy || deps.loading()) {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        return;
-      }
-      if (!nativeButton) {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-      }
-      const refresh = nativeButton || deps.fullRefresh();
-      if (!refresh) {
-        deps.reload();
-        return;
-      }
-      busy = true;
-      const disabled = button?.disabled;
-      if (button) button.disabled = true;
-      const started = deps.now();
-      const finish = () => {
-        busy = false;
-        if (button) button.disabled = disabled;
-      };
-      const check = () => {
-        const elapsed = deps.now() - started;
-        if (elapsed >= 2e4 || elapsed >= 600 && !deps.loading()) finish();
-        else deps.later(check, 100);
-      };
-      try {
-        deps.onFullRefresh?.();
-        if (nativeButton) {
-          const restore = deps.guardNativeScroll?.();
-          if (restore) deps.later(restore, 0);
-          deps.later(check, 100);
-          return;
-        }
-        const click = () => {
-          dispatching = true;
-          try {
-            refresh.click();
-          } finally {
-            dispatching = false;
-          }
-        };
-        if (deps.withoutScroll) deps.withoutScroll(click);
-        else click();
-        deps.later(check, 100);
-      } catch (e) {
-        finish();
-        logErr("首页完整刷新", e);
-        deps.reload();
-      }
-    };
-  }
-  function installHomeRefresh() {
-    const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    document.addEventListener("click", createHomeRefreshHandler({
-      enabled: () => CONFIG.enabled,
-      isHome: () => location.hostname === "www.bilibili.com" && location.pathname === "/",
-      fullRefresh: () => document.querySelector(HOME_FULL_REFRESH),
-      loading: () => !!unwrapState(unwrapState(W.__pinia?.feed)?.data)?.loading,
-      reload: () => location.reload(),
-      now: () => Date.now(),
-      later: (cb, ms) => setTimeout(cb, ms),
-      onFullRefresh: advanceHomeFeedEpoch,
-      withoutScroll: (action) => withoutHomeRefreshScroll(W, action),
-      guardNativeScroll: () => beginHomeRefreshScrollGuard(W)
-    }), true);
-  }
-
   // src/home-grid.ts
   var NAMES = /* @__PURE__ */ new Set(["RecommendContainer_FloorAside", "RecommendContainer_Overseas"]);
   var adapters = /* @__PURE__ */ new Set();
+  var owners = /* @__PURE__ */ new Map();
+  var nativeVideoTemplate;
   var counted = /* @__PURE__ */ new Set();
   var hasClass = (node, name) => typeof node?.props?.class === "string" && node.props.class.split(/\s+/).includes(name);
   var isSkeleton = (props) => props?.skeleton === true || props?.skeleton === "";
@@ -3522,6 +3412,79 @@
     discover(tree);
     return visit(tree);
   }
+  function resetHomeComponentTree(tree, generation, beforeMount) {
+    if (Array.isArray(tree)) return tree.map((node) => resetHomeComponentTree(node, generation, beforeMount));
+    if (!tree || typeof tree !== "object" || !tree.__v_isVNode) return tree;
+    if (NAMES.has(tree.type?.__name)) {
+      const original = tree.props?.onVnodeBeforeMount;
+      return {
+        ...tree,
+        key: `bfb-home:${generation}:${String(tree.key ?? tree.type.__name)}`,
+        props: { ...tree.props, onVnodeBeforeMount: (node, ...args) => {
+          if (Array.isArray(original)) original.forEach((fn) => fn(node, ...args));
+          else original?.(node, ...args);
+          beforeMount(node);
+        } },
+        el: null,
+        component: null,
+        dynamicChildren: null,
+        patchFlag: -2
+      };
+    }
+    if (Array.isArray(tree.children)) return cloneChildren(tree, resetHomeComponentTree(tree.children, generation, beforeMount));
+    if (tree.children && typeof tree.children === "object") {
+      const slots = { ...tree.children };
+      for (const key of Object.keys(slots)) if (typeof slots[key] === "function") {
+        const original = slots[key];
+        slots[key] = Object.assign((...args) => resetHomeComponentTree(original(...args), generation, beforeMount), original);
+      }
+      slots._ = 2;
+      delete slots.$stable;
+      return cloneChildren(tree, slots);
+    }
+    return tree;
+  }
+  function attachRender(instance) {
+    if (!instance || adapters.has(instance) || typeof instance.render !== "function") return;
+    const original = instance.render;
+    instance.render = function(...args) {
+      const tree = original.apply(this, args);
+      try {
+        return adaptHomeRender(tree, nativeVideoTemplate);
+      } catch (e) {
+        logErr("首页渲染适配", e);
+        return tree;
+      }
+    };
+    adapters.add(instance);
+  }
+  function attachOwner(parent) {
+    if (!parent || owners.has(parent) || typeof parent.render !== "function" || typeof parent.proxy?.$forceUpdate !== "function") return;
+    const state = { generation: 0 };
+    const original = parent.render;
+    parent.render = function(...args) {
+      const tree = original.apply(this, args);
+      return state.generation ? resetHomeComponentTree(tree, state.generation, (node) => attachRender(node.component)) : tree;
+    };
+    owners.set(parent, state);
+  }
+  function canResetHomeFeedView() {
+    return [...owners.keys()].some((parent) => !parent.isUnmounted);
+  }
+  async function resetHomeFeedView() {
+    const updates = [];
+    for (const [parent, state] of owners) {
+      if (parent.isUnmounted) {
+        owners.delete(parent);
+        continue;
+      }
+      state.generation++;
+      parent.proxy.$forceUpdate();
+      updates.push(parent.proxy.$nextTick());
+    }
+    await Promise.all(updates);
+    for (const instance of adapters) if (instance.isUnmounted) adapters.delete(instance);
+  }
   function attach(app) {
     let videoTemplate;
     const instances = [];
@@ -3537,19 +3500,10 @@
       if (Array.isArray(node.children)) node.children.forEach(walk);
     };
     walk(app?._container?._vnode);
+    nativeVideoTemplate ||= videoTemplate;
     for (const instance of instances) {
-      if (adapters.has(instance) || typeof instance.render !== "function" || !videoTemplate) continue;
-      const original = instance.render;
-      instance.render = function(...args) {
-        const tree = original.apply(this, args);
-        try {
-          return adaptHomeRender(tree, videoTemplate);
-        } catch (e) {
-          logErr("首页渲染适配", e);
-          return tree;
-        }
-      };
-      adapters.add(instance);
+      attachOwner(instance.parent);
+      attachRender(instance);
       instance.proxy?.$forceUpdate?.();
     }
   }
@@ -3593,6 +3547,163 @@
     const observer = new MutationObserver(inspect);
     observer.observe(document, { childList: true, subtree: true });
     setTimeout(() => observer.disconnect(), 15e3);
+  }
+
+  // src/home-refresh.ts
+  var WEB_CHANGE = 3;
+  var WEB_LOAD_MORE = 4;
+  var pagingGuards = /* @__PURE__ */ new WeakSet();
+  var replacingFeeds = /* @__PURE__ */ new WeakSet();
+  function hasNativeHomeContent(feed) {
+    const head = unwrapState(feed?.data)?.head?.recommend;
+    return Array.isArray(head) && head.some((item) => item && (item.goto || item.card_goto) !== "login_card");
+  }
+  function isHomeBrowsingInput(event) {
+    return !event.defaultPrevented && !event.target?.closest?.('[id^="bfb-"], .bfb-modal-back');
+  }
+  function guardNativeWebPaging(feed, suspended) {
+    if (!feed || pagingGuards.has(feed) || typeof feed.updateParams !== "function") return;
+    const original = feed.updateParams;
+    feed.updateParams = function(type, ...args) {
+      if (type === WEB_LOAD_MORE && suspended()) throw new DOMException("Homepage native paging is suspended", "AbortError");
+      return original.apply(this, [type, ...args]);
+    };
+    pagingGuards.add(feed);
+  }
+  function createHomeRefreshHandler(deps) {
+    let busy = false;
+    return (event) => {
+      if (!deps.enabled() || !deps.isHome() || event.button !== 0) return;
+      const target = event.target;
+      const button = target?.closest(HOME_ROLL_BUTTON);
+      if (!button && !target?.closest(HOME_FULL_REFRESH)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (busy || deps.loading()) return;
+      busy = true;
+      const disabled = button?.disabled;
+      if (button) button.disabled = true;
+      Promise.resolve().then(deps.refresh).then((handled) => {
+        if (!handled) deps.reload();
+      }, (error) => deps.failed?.(error)).finally(() => {
+        busy = false;
+        if (button) button.disabled = disabled;
+      });
+    };
+  }
+  function beginHomeRefreshLayoutGuard(doc) {
+    const patches = [];
+    const patch = (style, name, own) => {
+      patches.push({ style, name, value: style.getPropertyValue(name), priority: style.getPropertyPriority(name), own });
+      style.setProperty(name, own, "important");
+    };
+    for (const el of [doc.documentElement, doc.body]) if (el) {
+      patch(el.style, "overflow-anchor", "none");
+    }
+    const view = doc.defaultView;
+    if (doc.body && view) patch(doc.body.style, "min-height", `${Math.ceil(view.scrollY + view.innerHeight)}px`);
+    let restored = false;
+    return () => {
+      if (restored) return;
+      restored = true;
+      for (const p of patches) if (p.style.getPropertyValue(p.name) === p.own && p.style.getPropertyPriority(p.name) === "important") {
+        if (p.value) p.style.setProperty(p.name, p.value, p.priority);
+        else p.style.removeProperty(p.name);
+      }
+    };
+  }
+  async function replaceNativeWebFeed(feed, deps, loadMore = false) {
+    const previous = unwrapState(feed.data).recommend;
+    const type = loadMore ? WEB_LOAD_MORE : WEB_CHANGE;
+    if (!loadMore) deps.advance();
+    await feed.getHead({ ...feed.getPsParams(type), fresh_type: type, fetch_row: loadMore ? Number(feed.fetch_row) + 3 : 1 });
+    if (unwrapState(feed.data).recommend === previous) throw new Error("网页版推荐刷新失败，已保留原列表；未切换匿名或 App 推荐");
+    if (!loadMore) feed.fetch_row = 1;
+    feed.noMoreFeed = false;
+    const init = feed.initRequest;
+    const guardedInit = function(...args) {
+      return hasNativeHomeContent(feed) ? init.apply(this, args) : Promise.resolve();
+    };
+    feed.initRequest = guardedInit;
+    try {
+      await deps.reset();
+    } finally {
+      if (feed.initRequest === guardedInit) feed.initRequest = init;
+    }
+    await deps.afterPaint();
+  }
+  function nativeFeed() {
+    for (const root of document.querySelectorAll("#app, #i_cecream")) {
+      const feed = piniaStateFromApp(root.__vue_app__)?.feed;
+      if (typeof feed?.getHead === "function" && typeof feed?.getPsParams === "function") {
+        guardNativeWebPaging(feed, () => CONFIG.enabled && (replacingFeeds.has(feed) || !CONFIG.reviewMode && !hasNativeHomeContent(feed)));
+        return feed;
+      }
+    }
+    return null;
+  }
+  function installHomeRefresh() {
+    const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+    const isHome = () => location.hostname === "www.bilibili.com" && location.pathname === "/";
+    let running = false;
+    const refresh = async (loadMore = false) => {
+      const feed = nativeFeed();
+      if (!feed || !canResetHomeFeedView()) return false;
+      if (running) return true;
+      running = true;
+      replacingFeeds.add(feed);
+      const restore = beginHomeRefreshLayoutGuard(document);
+      try {
+        await replaceNativeWebFeed(feed, {
+          reset: resetHomeFeedView,
+          advance: advanceHomeFeedEpoch,
+          afterPaint: () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+        }, loadMore);
+        replacingFeeds.delete(feed);
+        if (W.scrollY > 0) W.dispatchEvent(new W.Event("scroll"));
+        return true;
+      } finally {
+        restore();
+        replacingFeeds.delete(feed);
+        running = false;
+      }
+    };
+    const failed = (error) => {
+      logErr("首页 WEB 完整换新", error);
+      toast(error instanceof Error ? error.message : "网页版推荐刷新失败，已保留原列表", "error");
+    };
+    document.addEventListener("click", createHomeRefreshHandler({
+      enabled: () => CONFIG.enabled,
+      isHome,
+      loading: () => running || !!unwrapState(nativeFeed()?.data)?.loading,
+      refresh,
+      reload: () => location.reload(),
+      failed
+    }), true);
+    const recoverEmpty = () => {
+      if (!CONFIG.enabled || !isHome() || running || CONFIG.reviewMode) return;
+      const feed = nativeFeed();
+      const data = unwrapState(feed?.data);
+      if (!feed || data?.loading || feed.noMoreFeed || !Array.isArray(data?.head?.recommend) || hasNativeHomeContent(feed)) return;
+      if (W.scrollY + W.innerHeight + 200 < document.body.scrollHeight) return;
+      void refresh(true).catch(failed);
+    };
+    W.addEventListener("wheel", (event) => {
+      if (isHomeBrowsingInput(event) && event.deltaY > 0) recoverEmpty();
+    }, { passive: true });
+    W.addEventListener("keydown", (event) => {
+      if (!isHomeBrowsingInput(event) || event.target?.closest?.('input,textarea,select,[contenteditable],a,button,[role="button"]')) return;
+      if (["ArrowDown", "PageDown", "End", " "].includes(event.key)) recoverEmpty();
+    });
+    let touchY = 0;
+    W.addEventListener("touchstart", (event) => {
+      touchY = event.touches[0]?.clientY ?? 0;
+    }, { passive: true });
+    W.addEventListener("touchmove", (event) => {
+      const y = event.touches[0]?.clientY ?? touchY;
+      if (isHomeBrowsingInput(event) && y < touchY) recoverEmpty();
+      touchY = y;
+    }, { passive: true });
   }
 
   // src/events.ts
@@ -4974,8 +5085,8 @@
     #bfb-panel .bfb-webdav-fields input:focus{outline:none;border-color:#fb7299;box-shadow:0 0 0 2px rgba(251,114,153,.18)}
     #bfb-panel .bfb-webdav-fields label{margin:0;font-size:12px}
     #bfb-panel .bfb-webdav-fields input{display:block;margin-top:5px}
-    #bfb-panel #bfb-wd-path,#bfb-panel #bfb-wd-found{overflow-wrap:anywhere}
-    #bfb-panel #bfb-wd-devices[hidden]{display:none}
+    #bfb-panel #bfb-wd-path,#bfb-panel #bfb-wd-found,#bfb-panel #bfb-wd-piliplus-target{overflow-wrap:anywhere}
+    #bfb-panel #bfb-wd-devices[hidden],#bfb-panel #bfb-wd-piliplus-fields[hidden]{display:none}
     #bfb-panel #bfb-wd-devices{margin-top:10px}
     #bfb-panel #bfb-wd-device{display:block;margin-top:5px;width:100%;padding:7px;border:1px solid #ddd;border-radius:8px;background:#fff;color:#222}
     #bfb-panel .bfb-webdav-fields input:-webkit-autofill{-webkit-text-fill-color:#222;box-shadow:0 0 0 1000px #fff inset}
@@ -6110,6 +6221,33 @@
     if (!names.length) return normalizeWebDavRepositoryUrl(root);
     return new URL(names.map(encodeURIComponent).join("/") + (collection ? "/" : ""), normalizeWebDavRepositoryUrl(root)).href;
   }
+  function resolveWebDavFilePath(root, raw, defaultFile = "piliplus_settings_phone.json") {
+    const path = raw.trim();
+    if (!path || path.length > 4096) throw new Error("请填写 PiliPlus 配置文件或目录路径");
+    if (/[\\\u0000-\u001f?#]/.test(path)) throw new Error("PiliPlus 路径不能包含查询参数、反斜杠或控制字符");
+    const absolute = /^https?:\/\//i.test(path);
+    const inputParts = (absolute ? path.replace(/^https?:\/\/[^/]+/i, "") : path).split("/").filter(Boolean);
+    for (const part of inputParts) {
+      let value;
+      try {
+        value = decodeURIComponent(part);
+      } catch {
+        throw new Error("PiliPlus 路径编码无效");
+      }
+      if (value === "." || value === ".." || /[/\\\u0000-\u001f]/.test(value)) throw new Error("PiliPlus 路径不能越出仓库或包含编码分隔符");
+    }
+    let parts;
+    if (absolute) {
+      const relative = repositoryRelativePath(root, path);
+      if (!relative) throw new Error("PiliPlus 文件不在当前 WebDAV 仓库下；不同服务请开启独立登录");
+      parts = relative;
+    } else {
+      if (/^[a-z][a-z\d+.-]*:/i.test(path) || path.startsWith("//")) throw new Error("PiliPlus 路径必须位于当前 WebDAV 仓库下");
+      parts = inputParts.map(decodeURIComponent);
+    }
+    if (path.endsWith("/") || !/\.[^./]+$/.test(parts[parts.length - 1] || "")) parts.push(defaultFile);
+    return repositoryChildUrl(root, parts);
+  }
   function pathParts(url) {
     try {
       const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
@@ -6171,6 +6309,7 @@
   }
 
   // src/webdav.ts
+  var EMPTY_PILIPLUS = { path: "", separate: false, url: "", username: "", password: "" };
   var EMPTY_SETTINGS = { url: "", username: "", password: "" };
   var WEBDAV_BACKUP_MAX = 2 * 1024 * 1024;
   var REQUEST_TIMEOUT = 3e4;
@@ -6179,10 +6318,10 @@
   }
   function legacyRepository(parsed) {
     const backup = str(parsed.url, 4096);
-    const pili = str(parsed.piliNaraUrl, 4096);
+    const pili = str(parsed.piliPlusUrl ?? parsed.piliNaraUrl, 4096);
     if (pili) {
       const url = new URL(pili);
-      const at = url.pathname.toLowerCase().lastIndexOf("/pilinara/");
+      const at = url.pathname.lastIndexOf("/", url.pathname.lastIndexOf("/") - 1);
       if (at >= 0) {
         url.pathname = url.pathname.slice(0, at + 1);
         url.hash = "";
@@ -6197,13 +6336,24 @@
       const raw = GM_getValue(WEBDAV_SETTINGS_KEY, null);
       const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
       if (!parsed || typeof parsed !== "object") return { ...EMPTY_SETTINGS };
-      const url = parsed.schemaVersion === 2 ? parsed.url ? normalizeWebDavRepositoryUrl(str(parsed.url, 4096)) : "" : legacyRepository(parsed);
-      const oldFile = str(parsed.schemaVersion === 2 ? parsed.legacyBackupUrl : parsed.url, 4096);
+      const current2 = parsed.schemaVersion >= 2;
+      const url = current2 ? parsed.url ? normalizeWebDavRepositoryUrl(str(parsed.url, 4096)) : "" : legacyRepository(parsed);
+      const oldFile = str(current2 ? parsed.legacyBackupUrl : parsed.url, 4096);
+      const oldPili = str(parsed.piliPlusUrl ?? parsed.piliNaraUrl, 4096);
+      const options = parsed.piliPlus && typeof parsed.piliPlus === "object" ? parsed.piliPlus : null;
+      const migratedPath = oldPili && repositoryRelativePath(url, oldPili)?.map(encodeURIComponent).join("/");
       return {
         url,
         ...oldFile && /\.json(?:[#?]|$)/i.test(oldFile) && repositoryRelativePath(url, oldFile) ? { legacyBackupUrl: oldFile } : {},
         username: str(parsed.username, 512),
-        password: str(parsed.password, 1024)
+        password: str(parsed.password, 1024),
+        ...options || migratedPath ? { piliPlus: {
+          path: str(options?.path, 4096) || migratedPath || "",
+          separate: options?.separate === true,
+          url: str(options?.url, 4096),
+          username: str(options?.username, 512),
+          password: str(options?.password, 1024)
+        } } : {}
       };
     } catch {
       return { ...EMPTY_SETTINGS };
@@ -6216,8 +6366,12 @@
       password: str(input.password, 1024)
     };
     const oldFile = input.legacyBackupUrl || loadWebDavSettings().legacyBackupUrl;
-    const saved = { ...settings, ...oldFile && repositoryRelativePath(settings.url, oldFile) ? { legacyBackupUrl: oldFile } : {} };
-    GM_setValue(WEBDAV_SETTINGS_KEY, JSON.stringify({ schemaVersion: 2, ...saved }));
+    const p = input.piliPlus ?? loadWebDavSettings().piliPlus;
+    const piliPlus = p && { path: str(p.path, 4096).trim(), separate: p.separate === true, url: str(p.url, 4096).trim(), username: str(p.username, 512), password: str(p.password, 1024) };
+    if (piliPlus?.separate) piliPlus.url = normalizeWebDavRepositoryUrl(piliPlus.url);
+    const saved = { ...settings, ...piliPlus ? { piliPlus } : {}, ...oldFile && repositoryRelativePath(settings.url, oldFile) ? { legacyBackupUrl: oldFile } : {} };
+    if (piliPlus?.path && (piliPlus.separate || settings.url)) resolveWebDavFilePath(piliPlus.separate ? piliPlus.url : settings.url, piliPlus.path);
+    GM_setValue(WEBDAV_SETTINGS_KEY, JSON.stringify({ schemaVersion: 3, ...saved }));
     return saved;
   }
   function basicAuth(username, password) {
@@ -6294,13 +6448,25 @@
     const response = await webDavRequest(settings, directory, "PROPFIND", PROPFIND_BODY, [], { Depth: depth });
     return parseWebDavDirectory(response.body, settings.url, directory);
   }
-  async function piliNaraFilesIn(settings, entries2) {
-    const folders = entries2.filter((x) => x.collection && x.name.toLowerCase() === "pilinara" && repositoryRelativePath(settings.url, x.url)?.length === 1);
+  function piliPlusConnection(settings) {
+    const p = settings.piliPlus;
+    if (!p?.separate) return { url: normalizeWebDavRepositoryUrl(settings.url), username: settings.username, password: settings.password };
+    return { url: normalizeWebDavRepositoryUrl(p.url), username: p.username, password: p.password };
+  }
+  async function piliPlusFilesIn(settings, entries2) {
+    const folders = entries2.filter((x) => x.collection && x.name.toLowerCase() === "piliplus" && repositoryRelativePath(settings.url, x.url)?.length === 1);
     const lists = await Promise.all(folders.map((x) => listWebDavDirectory(settings, x.url)));
     return lists.flat().filter((x) => !x.collection && /^piliplus_settings_(phone|pad|desktop)\.json$/i.test(x.name)).map((x) => ({ url: x.url, name: x.name, device: x.name.match(/_(phone|pad|desktop)\.json$/i)[1].toLowerCase() })).sort((a, b) => a.name.localeCompare(b.name));
   }
-  async function discoverPiliNaraFiles(settings) {
-    return piliNaraFilesIn(settings, await listWebDavDirectory(settings, normalizeWebDavRepositoryUrl(settings.url)));
+  async function discoverPiliPlusFiles(settings) {
+    const connection = piliPlusConnection(settings);
+    if (settings.piliPlus?.path.trim()) {
+      const url = resolveWebDavFilePath(connection.url, settings.piliPlus.path);
+      const parts = repositoryRelativePath(connection.url, url);
+      const name = parts[parts.length - 1];
+      return [{ url, name, device: name.match(/_(phone|pad|desktop)\.json$/i)?.[1].toLowerCase() || "custom" }];
+    }
+    return piliPlusFilesIn(connection, await listWebDavDirectory(connection, connection.url));
   }
   async function requestWebDavAccess(settings) {
     const root = normalizeWebDavRepositoryUrl(settings.url);
@@ -6310,10 +6476,16 @@
     const root = normalizeWebDavRepositoryUrl(settings.url);
     await requestWebDavAccess(settings);
     const entries2 = await listWebDavDirectory(settings, root);
-    const files = await piliNaraFilesIn(settings, entries2);
     const folder = entries2.find((x) => x.url === webDavBackupDirectory(settings) && x.collection);
     const backupExists = !!folder && (await listWebDavDirectory(settings, folder.url)).some((x) => x.url === webDavBackupUrl(settings) && !x.collection);
-    return { backupExists, piliNaraFiles: files };
+    return { backupExists, piliPlusFiles: [] };
+  }
+  async function testPiliPlusConnection(settings, chosen) {
+    const connection = piliPlusConnection(settings);
+    await requestWebDavAccess(connection);
+    const file = await piliPlusTarget(settings, chosen);
+    const response = await webDavRequest(connection, file, "GET");
+    return { file, remoteCount: Object.keys(parsePiliPlusBlockedUsers(response.body)).length };
   }
   function parseWebDavBackup(raw) {
     if (!raw || raw.length > WEBDAV_BACKUP_MAX) throw new Error("备份文件为空或超过 2MB");
@@ -6344,21 +6516,25 @@
     const s = typeof v === "number" && Number.isSafeInteger(v) ? String(v) : typeof v === "string" ? v.trim() : "";
     return /^[1-9]\d{0,19}$/.test(s) ? s : "";
   }
-  function parsePiliNaraDocument(raw) {
-    if (!raw || raw.length > WEBDAV_BACKUP_MAX) throw new Error("PiliNara 配置文件为空或超过 2MB");
+  function parsePiliPlusDocument(raw) {
+    if (!raw || raw.length > WEBDAV_BACKUP_MAX) throw new Error("PiliPlus 配置文件为空或超过 2MB");
     let parsed;
     try {
       parsed = JSON.parse(raw);
     } catch {
-      throw new Error("PiliNara 配置文件不是有效的 JSON");
+      throw new Error("PiliPlus 配置文件不是有效的 JSON");
     }
-    if (!isJsonRecord(parsed) || !isJsonRecord(parsed.setting) || !isJsonRecord(parsed.video) || !isJsonRecord(parsed.localCache)) {
-      throw new Error("文件不符合 PiliNara WebDAV 设置备份结构");
+    if (!isJsonRecord(parsed) || !isJsonRecord(parsed.setting) || !isJsonRecord(parsed.video)) {
+      throw new Error("文件不符合 PiliPlus WebDAV 设置备份结构");
     }
+    if (!isJsonRecord(parsed[cacheKeyOf(parsed)])) throw new Error("PiliPlus 备份未包含有效的 localcache 屏蔽数据，请在支持导出屏蔽名单的客户端中重新备份");
     return parsed;
   }
+  function cacheKeyOf(doc) {
+    return Object.prototype.hasOwnProperty.call(doc, "localcache") ? "localcache" : "localCache";
+  }
   function blockedUsersOf(doc) {
-    const raw = doc.localCache.recommendBlockedMids;
+    const raw = doc[cacheKeyOf(doc)].recommendBlockedMids;
     const out = /* @__PURE__ */ Object.create(null);
     if (Array.isArray(raw)) {
       for (const value of raw) {
@@ -6373,15 +6549,15 @@
         out[uid] = name || `UID:${uid}`;
       }
     } else if (raw != null) {
-      throw new Error("PiliNara 的 recommendBlockedMids 字段格式不受支持");
+      throw new Error("PiliPlus 的 recommendBlockedMids 字段格式不受支持");
     }
     return out;
   }
-  function parsePiliNaraBlockedUsers(raw) {
-    return blockedUsersOf(parsePiliNaraDocument(raw));
+  function parsePiliPlusBlockedUsers(raw) {
+    return blockedUsersOf(parsePiliPlusDocument(raw));
   }
-  function importPiliNaraBlockedUsers(raw) {
-    const remote = parsePiliNaraBlockedUsers(raw);
+  function importPiliPlusBlockedUsers(raw) {
+    const remote = parsePiliPlusBlockedUsers(raw);
     const seen = new Set(CONFIG.block.uids.map(String));
     let added = 0;
     let namesChanged = false;
@@ -6399,16 +6575,14 @@
     if (added || namesChanged) saveConfig();
     return { remoteCount: Object.keys(remote).length, added, localCount: CONFIG.block.uids.length };
   }
-  function stringifyPiliNaraDocument(doc, entries2, originalMap = "") {
-    const marker = `__bfb_pilinara_blocked_${Date.now()}_${Math.random()}__`;
-    doc.localCache.recommendBlockedMids = marker;
-    const shell = JSON.stringify(doc, null, 4);
-    const needle = JSON.stringify(marker);
-    const span = jsonPropertySpan(shell, ["localCache", "recommendBlockedMids"]);
-    const at = span?.start ?? -1;
-    if (at < 0) throw new Error("无法生成 PiliNara 屏蔽名单");
-    const lineStart = shell.lastIndexOf("\n", at) + 1;
-    const indent = (shell.slice(lineStart).match(/^\s*/) || [""])[0];
+  function appendPiliPlusUsers(raw, doc, entries2, originalMap = "") {
+    const cacheKey = cacheKeyOf(doc);
+    const span = jsonPropertySpan(raw, [cacheKey, "recommendBlockedMids"]);
+    const cacheSpan = jsonPropertySpan(raw, [cacheKey]);
+    if (!cacheSpan) throw new Error("无法定位 PiliPlus 屏蔽名单");
+    const at = span?.start ?? cacheSpan.start;
+    const lineStart = raw.lastIndexOf("\n", at) + 1;
+    const indent = (raw.slice(lineStart).match(/^\s*/) || [""])[0] + (span ? "" : "    ");
     const childIndent = indent + "    ";
     const addedJson = entries2.map(([uid, name]) => `${childIndent}${JSON.stringify(uid)}: ${JSON.stringify(name)}`).join(",\n");
     const mapJson = originalMap ? originalMap.slice(0, -1).trimEnd() + (Object.keys(JSON.parse(originalMap)).length ? "," : "") + `
@@ -6416,13 +6590,19 @@ ${addedJson}
 ${indent}}` : entries2.length ? `{
 ${addedJson}
 ${indent}}` : "{}";
-    return shell.slice(0, at) + mapJson + shell.slice(at + needle.length);
+    if (span) return raw.slice(0, span.start) + mapJson + raw.slice(span.end);
+    const cache = raw.slice(cacheSpan.start, cacheSpan.end);
+    const updated = cache.slice(0, -1).trimEnd() + (Object.keys(doc[cacheKey]).length ? "," : "") + `
+${indent}"recommendBlockedMids": ${mapJson}
+${indent.slice(0, -4)}}`;
+    return raw.slice(0, cacheSpan.start) + updated + raw.slice(cacheSpan.end);
   }
-  function buildPiliNaraBackupWithMergedBlockedUsers(raw) {
-    const doc = parsePiliNaraDocument(raw);
+  function buildPiliPlusBackupWithMergedBlockedUsers(raw) {
+    const doc = parsePiliPlusDocument(raw);
     const oldUsers = blockedUsersOf(doc);
-    const original = doc.localCache.recommendBlockedMids;
-    const span = isJsonRecord(original) ? jsonPropertySpan(raw, ["localCache", "recommendBlockedMids"]) : null;
+    const cacheKey = cacheKeyOf(doc);
+    const original = doc[cacheKey].recommendBlockedMids;
+    const span = isJsonRecord(original) ? jsonPropertySpan(raw, [cacheKey, "recommendBlockedMids"]) : null;
     const originalMap = span ? raw.slice(span.start, span.end) : "";
     const next = /* @__PURE__ */ Object.create(null);
     const orderedEntries = originalMap ? [] : Object.entries(oldUsers);
@@ -6441,19 +6621,21 @@ ${indent}}` : "{}";
       added++;
     }
     return {
-      body: added ? stringifyPiliNaraDocument(doc, orderedEntries, originalMap) : raw,
+      body: added ? appendPiliPlusUsers(raw, doc, orderedEntries, originalMap) : raw,
       result: { written: (isJsonRecord(original) ? Object.keys(original).length : Object.keys(oldUsers).length) + added, added, skippedInvalidUids }
     };
   }
-  async function piliNaraTarget(settings, chosen) {
+  async function piliPlusTarget(settings, chosen) {
+    const connection = piliPlusConnection(settings);
     if (chosen) {
-      const relative = repositoryRelativePath(settings.url, chosen);
-      if (!relative || relative.length !== 2 || relative[0].toLowerCase() !== "pilinara" || !/^piliplus_settings_(phone|pad|desktop)\.json$/i.test(relative[1])) throw new Error("PiliNara 文件不在当前仓库下");
+      const relative = repositoryRelativePath(connection.url, chosen);
+      const explicit = settings.piliPlus?.path.trim();
+      if (!relative?.length || chosen.endsWith("/") || (explicit ? chosen !== resolveWebDavFilePath(connection.url, explicit) : relative.length !== 2 || relative[0].toLowerCase() !== "piliplus" || !/^piliplus_settings_(phone|pad|desktop)\.json$/i.test(relative[1]))) throw new Error("PiliPlus 文件不在当前仓库或与配置路径不一致");
       return chosen;
     }
-    const files = await discoverPiliNaraFiles(settings);
-    if (!files.length) throw new Error("未找到 PiliNara 配置，请确认仓库下有 PiliNara 文件夹，并先在 PiliNara 中备份设置");
-    if (files.length > 1) throw new Error("发现多个 PiliNara 设备备份，请先测试连接并选择要合并的设备");
+    const files = await discoverPiliPlusFiles(settings);
+    if (!files.length) throw new Error("未找到 PiliPlus 配置，请确认仓库下有 PiliPlus 文件夹，并先在 PiliPlus 中备份设置");
+    if (files.length > 1) throw new Error("发现多个 PiliPlus 设备备份，请先测试连接并选择要合并的设备");
     return files[0].url;
   }
   function responseHeader(raw, name) {
@@ -6464,17 +6646,18 @@ ${indent}}` : "{}";
     }
     return "";
   }
-  async function readPiliNaraBlockedUsers(settings, chosen) {
-    const response = await webDavRequest(settings, await piliNaraTarget(settings, chosen), "GET");
-    return importPiliNaraBlockedUsers(response.body);
+  async function readPiliPlusBlockedUsers(settings, chosen) {
+    const response = await webDavRequest(piliPlusConnection(settings), await piliPlusTarget(settings, chosen), "GET");
+    return importPiliPlusBlockedUsers(response.body);
   }
-  async function writePiliNaraBlockedUsers(settings, chosen) {
-    const target = await piliNaraTarget(settings, chosen);
-    const response = await webDavRequest(settings, target, "GET");
-    const updated = buildPiliNaraBackupWithMergedBlockedUsers(response.body);
-    if (updated.body.length > WEBDAV_BACKUP_MAX) throw new Error("更新后的 PiliNara 配置超过 2MB，已拒绝写入");
+  async function writePiliPlusBlockedUsers(settings, chosen) {
+    const target = await piliPlusTarget(settings, chosen);
+    const connection = piliPlusConnection(settings);
+    const response = await webDavRequest(connection, target, "GET");
+    const updated = buildPiliPlusBackupWithMergedBlockedUsers(response.body);
+    if (updated.body.length > WEBDAV_BACKUP_MAX) throw new Error("更新后的 PiliPlus 配置超过 2MB，已拒绝写入");
     const etag = responseHeader(response.responseHeaders, "etag");
-    if (updated.result.added) await webDavRequest(settings, target, "PUT", updated.body, [], etag ? { "If-Match": etag } : {});
+    if (updated.result.added) await webDavRequest(connection, target, "PUT", updated.body, [], etag ? { "If-Match": etag } : {});
     return updated.result;
   }
 
@@ -6493,18 +6676,34 @@ ${indent}}` : "{}";
       </div>
       <div class="hint" id="bfb-wd-path"></div>
       <div class="toolbar" style="margin-top:8px">
-        <button class="act ghost" id="bfb-wd-save">保存设置</button><button class="act ghost" id="bfb-wd-test">测试连接</button>
+        <button class="act ghost" id="bfb-wd-save">保存设置</button><button class="act ghost" id="bfb-wd-test">测试备份连接</button>
         <button class="act" id="bfb-wd-upload">立即备份</button><button class="act ghost" id="bfb-wd-restore">从云端恢复</button>
       </div>
       <div class="stat" id="bfb-wd-status" style="margin-top:7px"></div>
-      <label id="bfb-wd-devices" hidden>PiliNara 设备备份<select id="bfb-wd-device" aria-label="PiliNara 设备备份"></select></label>
+      <label style="margin-top:14px">PiliPlus 屏蔽名单同步</label>
+      <div class="bfb-webdav-fields">
+        <label for="bfb-wd-piliplus-path">配置文件 / 目录路径<input type="text" id="bfb-wd-piliplus-path" placeholder="/piliplus/PiliPlus/piliplus_settings_phone.json" autocomplete="off"></label>
+      </div>
+      <div class="hint">路径从 WebDAV 仓库根目录算起，保留云端实际文件夹名称。填写文件名则使用该文件；仅填写目录则默认使用其中的 <code>piliplus_settings_phone.json</code>。留空时自动查找仓库下的 <code>PiliPlus/</code>。</div>
+      <div class="toolbar" style="margin:8px 0">
+        <button class="act ghost" id="bfb-wd-piliplus-separate" type="button" role="switch" aria-checked="false">使用独立 WebDAV 登录：关闭</button>
+      </div>
+      <div class="bfb-webdav-fields" id="bfb-wd-piliplus-fields" hidden>
+        <label for="bfb-wd-piliplus-url">PiliPlus WebDAV 仓库地址<input type="url" id="bfb-wd-piliplus-url" placeholder="https://dav.example.com/dav/" autocomplete="off"></label>
+        <label for="bfb-wd-piliplus-user">PiliPlus 用户名<input type="text" id="bfb-wd-piliplus-user" autocomplete="off"></label>
+        <label for="bfb-wd-piliplus-pass">PiliPlus 密钥 / 应用专用密码<input type="password" id="bfb-wd-piliplus-pass" autocomplete="off"></label>
+      </div>
+      <div class="hint" id="bfb-wd-piliplus-target"></div>
+      <label id="bfb-wd-devices" hidden>PiliPlus 设备备份<select id="bfb-wd-device" aria-label="PiliPlus 设备备份"></select></label>
       <div class="hint" id="bfb-wd-found"></div>
       <div class="toolbar" style="margin-top:8px">
-        <button class="act ghost" id="bfb-wd-pilinara-read">从 PiliNara 合并用户</button><button class="act ghost" id="bfb-wd-pilinara-write">向 PiliNara 合并用户</button>
+        <button class="act ghost" id="bfb-wd-piliplus-test">测试 PiliPlus 文件</button>
+        <button class="act ghost" id="bfb-wd-piliplus-read">从 PiliPlus 合并用户</button><button class="act ghost" id="bfb-wd-piliplus-write">向 PiliPlus 合并用户</button>
       </div>
-      <div class="hint">填写仓库目录，不是文件地址。备份时自动创建 <code>${APP_NAME}/</code>，配置保存在其中的 <code>config.json</code>。自动查找仓库下的 <code>PiliNara/</code>；多个设备备份需从识别结果中选择，无需手填文件路径。</div>
-      <div class="hint">PiliNara 仅同步 UID 黑名单，对应 <code>localCache.recommendBlockedMids</code>。两个方向都去重追加，不删除已有用户，不修改其他设置；不支持 BV/AV 视频名单。</div>
-      <div class="hint">配置备份不含 WebDAV 密钥、运行统计及个人状态。凭据只保存在本机；建议使用 HTTPS。填写或保存地址不会联网。“测试连接”先用不带凭据的只读请求申请访问该域名；若油猴提示，请只允许当前 WebDAV 域名，无需允许所有网站。插件不能代替你批准管理器权限。</div>`;
+      <div class="hint">关闭独立登录时，PiliPlus 使用上方本插件的 WebDAV 地址和凭据；开启后仅 PiliPlus 使用独立服务，不影响本插件备份。多个自动识别的设备备份需手动选择。</div>
+      <div class="hint">本插件填写仓库目录，不是文件地址。备份时自动创建 <code>${APP_NAME}/</code>，配置保存在其中的 <code>config.json</code>。测试连接与测试文件均只读，不创建或修改云端文件。</div>
+      <div class="hint">PiliPlus 仅同步 UID 黑名单，对应 <code>localcache.recommendBlockedMids</code>（兼容 <code>localCache</code>）。两个方向都去重追加，不删除已有用户，不修改其他设置；不支持 BV/AV 视频名单。</div>
+      <div class="hint">配置备份不含两套 WebDAV 凭据、运行统计及个人状态。凭据只保存在本机；建议使用 HTTPS。填写或保存地址不会联网。两个测试按钮均先用不带凭据的只读请求申请访问对应域名；若油猴提示，请只允许该域名，无需允许所有网站。插件不能代替你批准管理器权限。</div>`;
       host.appendChild(sec);
       const url = q(sec, "#bfb-wd-url");
       const username = q(sec, "#bfb-wd-user");
@@ -6514,20 +6713,56 @@ ${indent}}` : "{}";
       const devices = q(sec, "#bfb-wd-devices");
       const found = q(sec, "#bfb-wd-found");
       const path = q(sec, "#bfb-wd-path");
+      const piliPath = q(sec, "#bfb-wd-piliplus-path");
+      const piliTarget = q(sec, "#bfb-wd-piliplus-target");
+      const piliUrl = q(sec, "#bfb-wd-piliplus-url");
+      const piliUser = q(sec, "#bfb-wd-piliplus-user");
+      const piliPass = q(sec, "#bfb-wd-piliplus-pass");
+      const piliFields = q(sec, "#bfb-wd-piliplus-fields");
+      const separateButton = q(sec, "#bfb-wd-piliplus-separate");
       const buttons = Array.from(sec.querySelectorAll("button"));
       url.value = saved.url;
       username.value = saved.username;
       password.value = saved.password;
+      const p = saved.piliPlus || EMPTY_PILIPLUS;
+      let separate = p.separate;
+      piliPath.value = p.path;
+      piliUrl.value = p.url;
+      piliUser.value = p.username;
+      piliPass.value = p.password;
       let files = [];
       let discoveryKey = "";
-      const key = (s) => JSON.stringify([s.url, s.username, s.password]);
-      const showPath = (s) => {
-        path.textContent = s.url ? `本插件备份：${webDavBackupUrl(s)}；联网目标：${new URL(s.url).hostname}` : `本插件备份：仓库/${APP_NAME}/config.json`;
+      const values = () => ({
+        url: url.value,
+        username: username.value,
+        password: password.value,
+        piliPlus: { path: piliPath.value, separate, url: piliUrl.value, username: piliUser.value, password: piliPass.value }
+      });
+      const key = (s) => JSON.stringify([piliPlusConnection(s), s.piliPlus?.path || ""]);
+      const showSeparate = () => {
+        piliFields.hidden = !separate;
+        separateButton.setAttribute("aria-checked", String(separate));
+        separateButton.textContent = `使用独立 WebDAV 登录：${separate ? "开启" : "关闭"}`;
       };
+      const showPath = (s) => {
+        try {
+          path.textContent = s.url.trim() ? `本插件备份：${webDavBackupUrl(s)}` : `本插件备份：仓库/${APP_NAME}/config.json`;
+        } catch {
+          path.textContent = "请填写有效的本插件 WebDAV 仓库地址";
+        }
+        try {
+          const connection = piliPlusConnection(s);
+          piliTarget.textContent = `${s.piliPlus?.separate ? "独立服务" : "共用本插件服务"} · PiliPlus：${s.piliPlus?.path.trim() ? resolveWebDavFilePath(connection.url, s.piliPlus.path) : connection.url + "PiliPlus/（自动识别）"}`;
+        } catch {
+          piliTarget.textContent = separate ? "请填写独立 WebDAV 地址与配置路径" : "PiliPlus 默认共用本插件的 WebDAV 地址与凭据";
+        }
+      };
+      showSeparate();
       showPath(saved);
       const readAndSave = () => {
-        const s = saveWebDavSettings({ url: url.value, username: username.value, password: password.value });
+        const s = saveWebDavSettings(values());
         url.value = s.url;
+        if (s.piliPlus?.separate) piliUrl.value = s.piliPlus.url;
         showPath(s);
         return s;
       };
@@ -6546,28 +6781,35 @@ ${indent}}` : "{}";
         discoveryKey = key(s);
         device.replaceChildren();
         if (files.length > 1) device.add(new Option("请选择要合并的设备", ""));
-        for (const f of files) device.add(new Option(`${{ phone: "手机", pad: "平板", desktop: "桌面" }[f.device]} · ${f.name}`, f.url));
+        for (const f of files) device.add(new Option(`${{ phone: "手机", pad: "平板", desktop: "桌面", custom: "自定义" }[f.device]} · ${f.name}`, f.url));
         if (previous && files.some((f) => f.url === previous)) device.value = previous;
         devices.hidden = files.length <= 1;
-        found.textContent = files.length === 1 ? `已识别 PiliNara：${files[0].url}` : files.length ? `已识别 ${files.length} 个 PiliNara 设备备份，请选择后合并。` : "尚未识别 PiliNara 备份。请先在 PiliNara 中备份设置，再测试连接。";
+        found.textContent = files.length === 1 ? `选用 PiliPlus 文件：${files[0].url}` : files.length ? `已识别 ${files.length} 个 PiliPlus 设备备份，请选择后测试或合并。` : "尚未识别 PiliPlus 备份。请填写实际路径，或先在 PiliPlus 中备份设置。";
       };
-      for (const field of [url, username, password]) field.addEventListener("input", () => {
+      const invalidate = () => {
         files = [];
         discoveryKey = "";
         device.replaceChildren();
         devices.hidden = true;
         found.textContent = "";
-      });
+        showPath(values());
+      };
+      for (const field of [url, username, password, piliPath, piliUrl, piliUser, piliPass]) field.addEventListener("input", invalidate);
+      separateButton.onclick = () => {
+        separate = !separate;
+        showSeparate();
+        invalidate();
+      };
       const chosenFile = async (s) => {
-        if (discoveryKey !== key(s)) setFiles(s, await discoverPiliNaraFiles(s));
-        if (!files.length) throw new Error("未找到 PiliNara 配置，请先在 PiliNara 中备份设置，并确认仓库目录正确");
-        if (files.length > 1 && !device.value) throw new Error("请先选择要合并的 PiliNara 设备备份");
+        if (discoveryKey !== key(s)) setFiles(s, await discoverPiliPlusFiles(s));
+        if (!files.length) throw new Error("未找到 PiliPlus 配置，请先在 PiliPlus 中备份设置，并确认仓库目录正确");
+        if (files.length > 1 && !device.value) throw new Error("请先选择要合并的 PiliPlus 设备备份");
         return files.length === 1 ? files[0].url : device.value;
       };
       q(sec, "#bfb-wd-save").onclick = () => {
         try {
           readAndSave();
-          status.textContent = "设置已保存，点击“测试连接”自动识别目录与设备备份";
+          status.textContent = "设置已保存在本机，未联网。可分别测试备份连接和 PiliPlus 文件";
           toast("WebDAV 设置已保存", "success");
         } catch (e) {
           fail(e);
@@ -6577,11 +6819,30 @@ ${indent}}` : "{}";
         setBusy(true);
         status.textContent = "正在申请 WebDAV 域名访问并验证仓库；若油猴提示，请允许该域名…";
         try {
-          const s = readAndSave();
-          const result = await testWebDavConnection(s);
-          setFiles(s, result.piliNaraFiles);
+          const result = await testWebDavConnection(readAndSave());
           status.textContent = result.backupExists ? "连接成功，已找到本插件备份" : "连接成功，点击“立即备份”自动创建本插件目录和配置文件";
           toast("WebDAV 连接成功", "success");
+        } catch (e) {
+          fail(e);
+        } finally {
+          setBusy(false);
+        }
+      };
+      q(sec, "#bfb-wd-piliplus-test").onclick = async () => {
+        setBusy(true);
+        status.textContent = "正在申请 PiliPlus WebDAV 域名访问并只读校验配置文件…";
+        try {
+          const s = readAndSave();
+          const selected = discoveryKey === key(s) && device.value ? device.value : void 0;
+          try {
+            const result = await testPiliPlusConnection(s, selected);
+            if (discoveryKey !== key(s)) setFiles(s, await discoverPiliPlusFiles(s));
+            status.textContent = `PiliPlus 文件可读，格式有效，共 ${result.remoteCount} 个屏蔽用户；未修改云端文件`;
+            toast("PiliPlus 文件连接成功", "success");
+          } catch (e) {
+            if (e instanceof Error && e.message.startsWith("发现多个 PiliPlus")) setFiles(s, await discoverPiliPlusFiles(s));
+            throw e;
+          }
         } catch (e) {
           fail(e);
         } finally {
@@ -6618,34 +6879,34 @@ ${indent}}` : "{}";
           setBusy(false);
         }
       };
-      q(sec, "#bfb-wd-pilinara-read").onclick = async () => {
+      q(sec, "#bfb-wd-piliplus-read").onclick = async () => {
         setBusy(true);
-        status.textContent = "正在识别并读取 PiliNara 屏蔽用户…";
+        status.textContent = "正在识别并读取 PiliPlus 屏蔽用户…";
         try {
           const s = readAndSave();
-          const result = await readPiliNaraBlockedUsers(s, await chosenFile(s));
+          const result = await readPiliPlusBlockedUsers(s, await chosenFile(s));
           rescanAfterRuleChange();
           updateBadge();
           status.textContent = `已读取 ${result.remoteCount} 个用户，新增 ${result.added} 个；本地现有 ${result.localCount} 个 UID`;
-          toast(`已从 PiliNara 合并 ${result.added} 个屏蔽用户`, "success");
+          toast(`已从 PiliPlus 合并 ${result.added} 个屏蔽用户`, "success");
         } catch (e) {
           fail(e);
         } finally {
           setBusy(false);
         }
       };
-      q(sec, "#bfb-wd-pilinara-write").onclick = async () => {
+      q(sec, "#bfb-wd-piliplus-write").onclick = async () => {
         setBusy(true);
         try {
           const s = readAndSave();
           const chosen = await chosenFile(s);
           if (!await confirmModal(`将本插件 UID 黑名单合并到 ${files.find((f) => f.url === chosen)?.name}？
 
-重复 UID 跳过，新增 UID 追加到末尾，不删除或替换已有用户；其他设置不变。`, { title: "合并 PiliNara 屏蔽名单", okText: "合并" })) return;
-          status.textContent = "正在校验并更新 PiliNara 配置…";
-          const result = await writePiliNaraBlockedUsers(s, chosen);
-          status.textContent = `已向 PiliNara 新增 ${result.added} 个用户，远端共 ${result.written} 个${result.skippedInvalidUids ? `，跳过 ${result.skippedInvalidUids} 个非数字 UID` : ""}`;
-          toast(`已向 PiliNara 合并 ${result.added} 个屏蔽用户`, "success");
+重复 UID 跳过，新增 UID 追加到末尾，不删除或替换已有用户；其他设置不变。`, { title: "合并 PiliPlus 屏蔽名单", okText: "合并" })) return;
+          status.textContent = "正在校验并更新 PiliPlus 配置…";
+          const result = await writePiliPlusBlockedUsers(s, chosen);
+          status.textContent = `已向 PiliPlus 新增 ${result.added} 个用户，远端共 ${result.written} 个${result.skippedInvalidUids ? `，跳过 ${result.skippedInvalidUids} 个非数字 UID` : ""}`;
+          toast(`已向 PiliPlus 合并 ${result.added} 个屏蔽用户`, "success");
         } catch (e) {
           fail(e);
         } finally {
