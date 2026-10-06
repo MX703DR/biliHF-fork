@@ -498,7 +498,7 @@ describe('exportSubscription：把自己的黑名单导成订阅名单', () => {
     CONFIG.allow.uids.push('999'); // 白名单不该出现
     CONFIG.block.minViews = 5; // 数值阈值不该出现
     const out = JSON.parse(exportSubscription('我的名单'));
-    expect(out.app).toBe('biliHoyoFairy');
+    expect(out.app).toBe('biliHoyoFairy-MX703');
     expect(out.format).toBe(1);
     expect(out.meta.title).toBe('我的名单');
     expect(out.rules.keywords).toEqual(['原神']);

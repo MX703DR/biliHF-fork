@@ -16,6 +16,7 @@ import { COMMENT_TAGS, isCommentTag } from './selectors';
 // 只声明我们真正读的字段，全部可选：这是别人家的结构，会随改版变，缺字段必须等价于「不命中」而不是抛错。
 // 写出来的好处是「我们依赖了对方哪些字段」有一份可查的清单，改版排查时不用再翻实现。
 interface CmtMember {
+  mid?: string | number;
   uname?: string;
   avatar?: string;
   level_info?: { current_level?: number };
@@ -25,7 +26,9 @@ interface CmtContent {
   message?: string;
   members?: CmtMember[]; // 评论里 @ 到的人（用于「召唤 AI」判定）
 }
-interface CmtData {
+export interface CmtData {
+  rpid?: string | number;
+  parent?: string | number;
   mid?: string | number;
   member?: CmtMember;
   content?: CmtContent;
@@ -44,6 +47,7 @@ export interface CommentHost extends HTMLElement {
   __bfbCmtV?: number;
   __bfbCmtHit?: boolean;
   __bfbCmtExpanded?: boolean;
+  __bfbCmtReplyPending?: boolean;
 }
 
 // Element → CommentHost 的收窄只发生在这两处（DOM 给我们的静态类型只到 Element/EventTarget）：
@@ -60,6 +64,9 @@ export function asCommentHost(el: Element | null | undefined): CommentHost | nul
 export interface CmtInfo {
   uname: string;
   mid: string | number | undefined;
+  rpid: string | number | undefined;
+  parentId: string | number | undefined;
+  replyToUname: string;
   level: number | null;
   noface: boolean;
   message: string;
@@ -69,10 +76,17 @@ export interface CmtInfo {
   me: string | undefined;
 }
 
+// B 站楼中楼回复另一条楼中楼时，原始正文格式为“回复 @用户名 :正文”。
+// 用户名允许包含空格，所以不能再用“不含空白”的旧正则；只取第一个中英文冒号前的最短内容。
+function replyTargetFromMessage(message: unknown): string {
+  const m = String(message || '').match(/^回复\s*@(.+?)\s*[:：]/u);
+  return m ? m[1].trim() : '';
+}
+
 // 归一评论正文：去掉开头“回复 @x:”、去 @提及、去 [表情] 占位，便于关键词/空洞判定。
 function cmtCleanMsg(msg: unknown, isSub: boolean): string {
   let s = (msg || '').toString();
-  if (isSub) s = s.replace(/^回复\s?@[^@\s:：]+\s?[:：]/, '');
+  if (isSub) s = s.replace(/^回复\s*@.+?\s*[:：]/u, '');
   return s.replace(/@[^@\s]+/g, ' ').replace(/(\[[^[\]]+\])+/g, ' ').trim();
 }
 // 去表情后是否为空（纯表情/纯 @）
@@ -83,6 +97,10 @@ const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE00}
 
 export function readCmt(host: CommentHost | null | undefined): CmtInfo {
   const d: CmtData = (host && host.__data) || {};
+  return readCmtData(d, { upMid: host?.__upMid, me: host?.__user?.uname });
+}
+
+export function readCmtData(d: CmtData, context: { upMid?: string | number; me?: string } = {}): CmtInfo {
   const member: CmtMember = d.member || {};
   const content: CmtContent = d.content || {};
   const lv = member.level_info && member.level_info.current_level;
@@ -90,14 +108,24 @@ export function readCmt(host: CommentHost | null | undefined): CmtInfo {
   return {
     uname: ((member.uname || '') + '').trim(),
     mid: d.mid,
+    rpid: d.rpid,
+    parentId: d.parent,
+    replyToUname: replyTargetFromMessage(content.message),
     level: typeof lv === 'number' ? lv : null,
     noface: (member.avatar || '').endsWith('noface.jpg') && (vipStatus === 0 || vipStatus == null),
     message: (content.message || '') + '',
     members: Array.isArray(content.members) ? content.members : [],
     isUpTop: !!(d.reply_control && d.reply_control.is_up_top),
-    upMid: host ? host.__upMid : undefined, // B 站组件挂的视频 UP mid（可能缺，缺则 isUp 白名单不生效）
-    me: host && host.__user ? host.__user.uname : undefined, // 当前登录用户名（可能缺）
+    upMid: context.upMid,
+    me: context.me,
   };
+}
+
+// 用结构化 parent rpid 补全直接回复的目标；父评论尚未加载时保留正文前缀解析出的后备值。
+// 独立成纯函数，既让扫描热路径只做一次 Map 查询，也能锁住 B 站“直接回复无前缀”的关键行为。
+export function resolveReplyTarget(c: CmtInfo, authors: ReadonlyMap<string, string> | null): string {
+  const parentKey = c.parentId == null || String(c.parentId) === '0' ? '' : String(c.parentId);
+  return (parentKey && authors && authors.get(parentKey)) || c.replyToUname;
 }
 
 // 返回命中原因或 null。白名单优先（UP/置顶/自己）。
@@ -111,6 +139,9 @@ export function matchComment(c: CmtInfo, isSub: boolean): string | null {
   if (cc.allowMe && c.me && (c.uname === c.me || c.message.includes('@' + c.me))) return null;
   // —— 黑名单 ——
   if (c.uname && M.cmtUserSet.has(lc(c.uname))) return '评论用户:' + c.uname;
+  if (cc.hideRepliesToBlockedUsers && isSub && c.replyToUname && M.cmtUserSet.has(lc(c.replyToUname))) {
+    return '回复已屏蔽用户:' + c.replyToUname;
+  }
   if (c.uname && textHit(c.uname, M.cmtUserKw)) return '评论昵称词';
   const clean = cmtCleanMsg(c.message, isSub);
   if (textHit(clean, M.cmtKw)) return '评论关键词';
@@ -219,12 +250,24 @@ function removeCmtPlaceholder(host: CommentHost) {
 }
 
 // 处理单条评论宿主（错误边界 + 版本号去重）。
-const processComment = safe('processComment', function (host: CommentHost, isSub: boolean) {
-  if (host.__bfbCmtV === ruleVersion) return; // 本版本已评估过
+type CommentAuthorMap = Map<string, string>;
+
+const processComment = safe('processComment', function (host: CommentHost, isSub: boolean, authors: CommentAuthorMap | null) {
+  if (host.__bfbCmtV === ruleVersion && !host.__bfbCmtReplyPending) return; // 本版本已评估过
   const c = readCmt(host);
   // 数据未 hydrate 时**不打版本号**：评论宿主常常先入 DOM、__data 后到，
   // 提前打标会让这条评论在本规则版本内被永久跳过（下一轮扫描直接 return），规则形同虚设。
   if (!c.uname && !c.message) return; // 还没渲染出数据，等下一轮
+  // 直接回复一级评论时正文没有“回复 @某人”前缀，只能通过 parent rpid 找到被回复者。
+  // 先在本轮扫描收集全部已 hydrate 评论的 rpid→作者；父评论尚未到达时保留 pending，下一轮重试。
+  const parentKey = c.parentId == null || String(c.parentId) === '0' ? '' : String(c.parentId);
+  c.replyToUname = resolveReplyTarget(c, authors);
+  host.__bfbCmtReplyPending = !!(
+    CONFIG.comment.hideRepliesToBlockedUsers &&
+    isSub &&
+    parentKey &&
+    !c.replyToUname
+  );
   host.__bfbCmtV = ruleVersion;
   const reason = matchComment(c, isSub);
   if (reason) {
@@ -276,6 +319,7 @@ function revertComments() {
       host.removeAttribute('title');
       host.__bfbCmtHit = false;
       host.__bfbCmtExpanded = false;
+      host.__bfbCmtReplyPending = false;
       host.__bfbCmtV = undefined;
     }
   }
@@ -287,6 +331,19 @@ export function scanComments(): void {
     return;
   }
   let cmtHosts = 0;
+  let authors: CommentAuthorMap | null = null;
+  // 该规则要覆盖“直接回复一级评论”：这类正文不带被回复者，只能先做一次轻量索引再判定。
+  if (CONFIG.comment.hideRepliesToBlockedUsers && M.cmtUserSet.size > 0) {
+    authors = new Map<string, string>();
+    for (const root of commentRoots) {
+      const host = hostOf(root);
+      if (!host || !host.isConnected) continue;
+      const d = host.__data;
+      const rpid = d && d.rpid;
+      const uname = d && d.member && String(d.member.uname || '').trim();
+      if (rpid != null && String(rpid) !== '0' && uname) authors.set(String(rpid), uname);
+    }
+  }
   // 只遍历评论 root（注册时已分流），不再每轮扫全部 root 再按标签名过滤。
   // 失效的 root 跳过即可，回收由 shadow.pruneShadowRoots 的定时器统一负责。
   for (const root of commentRoots) {
@@ -295,7 +352,7 @@ export function scanComments(): void {
     const isSub = COMMENT_TAGS[host.tagName];
     if (isSub === undefined) continue;
     cmtHosts++;
-    processComment(host, isSub);
+    processComment(host, isSub, authors);
   }
   // 诊断：调试模式下，输出当前捕获到的全部 shadow 宿主标签 + 评论宿主数（标签集变化才打，避免刷屏）
   if (CONFIG.debug) {
@@ -311,13 +368,14 @@ export function scanComments(): void {
     }
   }
 }
-// 评论增量很碎（每条评论各自 attachShadow），用节流聚合扫描。
-let cmtTimer: ReturnType<typeof setTimeout> | null = null;
+// Web Component 的同步规则必须在同一帧绘制前生效；微任务合批，不再等 300ms 后才折叠。
+let cmtQueued = false;
 export function scheduleCommentScan(): void {
   if (!CONFIG.comment.enabled) return;
-  if (cmtTimer) return;
-  cmtTimer = setTimeout(() => {
-    cmtTimer = null;
+  if (cmtQueued) return;
+  cmtQueued = true;
+  queueMicrotask(() => {
+    cmtQueued = false;
     scanComments();
-  }, 300);
+  });
 }

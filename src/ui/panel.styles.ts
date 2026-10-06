@@ -5,7 +5,8 @@
     .bfb-tag{position:absolute;top:6px;left:6px;z-index:9;display:flex;align-items:center;gap:6px;background:rgba(251,114,153,.95);color:#fff;border-radius:8px;padding:3px 6px;font-size:11px;font-family:system-ui,Arial;box-shadow:0 2px 6px rgba(0,0,0,.25)}
     .bfb-tag .rs{white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis}
     .bfb-tag button{border:none;border-radius:6px;background:#fff;color:#1b7a3d;font-size:11px;padding:2px 6px;cursor:pointer;white-space:nowrap}
-    #bfb-badge{position:fixed;right:18px;bottom:18px;z-index:99999;background:#fb7299;color:#fff;border-radius:24px;padding:8px 14px;font-size:13px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.2);font-family:system-ui,Arial;user-select:none}
+    #bfb-badge{position:fixed;right:18px;bottom:18px;z-index:99999;background:#fb7299;color:#fff;border-radius:24px;padding:8px 14px;font-size:13px;cursor:grab;box-shadow:0 4px 14px rgba(0,0,0,.2);font-family:system-ui,Arial;user-select:none;touch-action:none}
+    #bfb-badge.dragging{cursor:grabbing;transition:none}
     #bfb-badge.off{background:#999}
     #bfb-badge.warn{background:#e67e22}
     #bfb-ctxmenu{position:fixed;z-index:100002;background:#fff;border:1px solid #ffd5e2;border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.22);overflow:hidden;min-width:210px;font-family:system-ui,Arial}
@@ -72,6 +73,16 @@
     #bfb-panel input[type=number]{width:80px;padding:4px 6px;border:1px solid #ddd;border-radius:6px}
     #bfb-panel .hint{font-size:11px;color:#6e6e6e;margin-top:7px;line-height:1.7}
     #bfb-panel .toolbar{display:flex;gap:8px;flex-wrap:wrap}
+    #bfb-panel .bfb-webdav-fields{display:grid;gap:6px}
+    #bfb-panel .bfb-webdav-fields input{width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid #ddd;border-radius:8px;font-size:12px;background:#fff;color:#222}
+    #bfb-panel .bfb-webdav-fields input:focus{outline:none;border-color:#fb7299;box-shadow:0 0 0 2px rgba(251,114,153,.18)}
+    #bfb-panel .bfb-webdav-fields label{margin:0;font-size:12px}
+    #bfb-panel .bfb-webdav-fields input{display:block;margin-top:5px}
+    #bfb-panel #bfb-wd-path,#bfb-panel #bfb-wd-found{overflow-wrap:anywhere}
+    #bfb-panel #bfb-wd-devices[hidden]{display:none}
+    #bfb-panel #bfb-wd-devices{margin-top:10px}
+    #bfb-panel #bfb-wd-device{display:block;margin-top:5px;width:100%;padding:7px;border:1px solid #ddd;border-radius:8px;background:#fff;color:#222}
+    #bfb-panel .bfb-webdav-fields input:-webkit-autofill{-webkit-text-fill-color:#222;box-shadow:0 0 0 1000px #fff inset}
     #bfb-panel button.act{background:#fb7299;color:#fff;border:none;border-radius:8px;padding:8px 12px;cursor:pointer;font-size:13px}
     #bfb-panel button.ghost{background:#f3f3f3;color:#333}
     #bfb-panel .switch{display:flex;align-items:center;gap:8px;font-size:13px;color:#333;font-weight:600;margin-top:9px;line-height:1.5}
@@ -161,6 +172,9 @@
       .bfb-modal-input{background:#26262b;color:#e6e6e9;border-color:#44444c}
       #bfb-panel .empty{color:#9a9aa2}
       #bfb-panel .addrow input,#bfb-panel input[type=number]{background:#26262b;border-color:#44444c;color:#e6e6e9}
+      #bfb-panel .bfb-webdav-fields input{background:#26262b;border-color:#44444c;color:#e6e6e9}
+      #bfb-panel #bfb-wd-device{background:#26262b;border-color:#44444c;color:#e6e6e9}
+      #bfb-panel .bfb-webdav-fields input:-webkit-autofill{-webkit-text-fill-color:#e6e6e9;box-shadow:0 0 0 1000px #26262b inset}
       #bfb-panel .chip-search input{background:#232328;border-color:#3a3a42;color:#e6e6e9}
       #bfb-panel .chip-search input:focus{background:#26262b}
       #bfb-panel button.ghost{background:#2e2e34}

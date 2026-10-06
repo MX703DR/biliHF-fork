@@ -4,7 +4,7 @@
 ! description: 可同时订阅多份，规则自动合并去重
 ! version: 2026.06.19
 ! expires: 1d
-! homepage: https://github.com/gendu-amd/biliHoyoFairy
+! homepage: https://github.com/MX703DR/biliHF-fork
 ! minScriptVersion: 0.0.3
 !
 ! 用法：一行一条；行首前缀决定维度，无前缀 = 关键词；以 ! 开头的整行是注释。

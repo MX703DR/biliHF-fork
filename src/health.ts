@@ -20,6 +20,12 @@ export const health = {
   feedLike: 0, // 其中「形似推荐流」的请求数（判断该不该报警的前提）
   feedMatched: 0, // 命中 FEED_HOOKS 的响应数
   feedParsed: 0, // 命中后又成功取出可过滤列表的响应数
+  initialParsed: 0, // 成功识别的首屏状态数（单独记，不能掩盖后续网络管线的失败）
+  initialItems: 0,
+  initialKept: 0,
+  feedKept: 0,
+  pendingFilters: 0,
+  pendingResponses: 0, // 请求尚在下载 / 过滤，不能提前断言接口结构坏了
   feedItems: 0, // 累计经过拦截层判定的列表项数
   feedLikes: 0, // 其中**带到了点赞数**的条数。点赞类规则的命根子：接口不给这个字段，
   // 那些规则在信息流上就是死的，而这种失效完全无声——正是要靠计数器才看得出来。
@@ -43,8 +49,14 @@ export function markHealthReady(): void {
 export function healthDegraded(): boolean {
   if (!ready) return false;
   if (health.feedLike > 0 && health.feedMatched === 0) return true;
-  if (health.feedMatched > 0 && health.feedParsed === 0) return true;
-  return pageType() !== '其他' && health.cardsSeen === 0;
+  if (health.feedMatched > 0 && health.feedParsed === 0 && !health.pendingFilters && !health.pendingResponses) return true;
+  return missingCards();
+}
+
+function missingCards(): boolean {
+  // 数据层全部过滤 / 合法空列表 / 仍在等元数据，不是 DOM 选择器坏了。
+  return !health.pendingFilters && !health.pendingResponses && pageType() !== '其他' && health.cardsSeen === 0 &&
+    ((health.feedParsed === 0 && health.initialParsed === 0) || health.feedKept > 0 || health.initialKept > 0);
 }
 
 // —— 耗时采样（仅 debug 模式）——
@@ -94,8 +106,8 @@ export function healthReport(): string[] {
   // 按旧判据会在每个刚打开的首页上无脑报警。
   if (health.feedLike > 0 && health.feedMatched === 0) {
     w.push(`本页发出了 ${health.feedLike} 个形似推荐流的接口请求，却没有一个命中拦截规则表：接口路径可能已变更，拦截层当前未生效。请更新脚本或提 Issue。`);
-  } else if (health.feedMatched > 0 && health.feedParsed === 0) {
-    w.push('已捕获到推荐接口响应，但取不出其中的视频列表：接口返回结构可能已变更，拦截层当前未生效。请更新脚本或提 Issue。');
+  } else if (health.feedMatched > 0 && health.feedParsed === 0 && !health.pendingFilters && !health.pendingResponses) {
+    w.push('推荐接口请求已结束，但尚未取得可解析的视频列表：请检查网络及风控状态，也可能是接口返回结构变更。');
   }
   // 用户开着一个不生效的开关，比脚本坏了更难自己发现——页面一切正常，只是设的东西没用。
   if (health.signedSkipped > 0) {
@@ -103,7 +115,7 @@ export function healthReport(): string[] {
       `有 ${health.signedSkipped} 个请求因携带 WBI 签名（w_rid）而放弃改写：签名覆盖全部查询参数，改动会被 B 站判为 -403 校验失败。目前唯一会改写请求的功能是「进阶 → 增大首页推荐每批加载数量」，它在这些已签名的接口上不会生效（不影响屏蔽本身），可以关掉。`
     );
   }
-  if (pageType() !== '其他' && health.cardsSeen === 0) {
+  if (missingCards()) {
     w.push('未识别到任何视频卡：卡片选择器可能已失效，DOM 兜底层当前未生效。请更新脚本或提 Issue。');
   }
   return w;
@@ -113,7 +125,7 @@ export function healthReport(): string[] {
 // 因为 health 不能反过来依赖 config（config 已经为了 timed 依赖了 health）。
 export function likesDataWarning(hasLikeRule: boolean): string | null {
   if (!hasLikeRule || health.feedItems === 0 || health.feedLikes > 0) return null;
-  return `已判定 ${health.feedItems} 条信息流数据，但**没有一条带点赞数**——B 站这些接口这次没返回该字段，所以「点赞数」与「营销号识别」在信息流上不会生效。要让它们真正生效，请打开「进阶 → 精确过滤」（会按需读取视频详情补齐点赞数）。`;
+  return `已判定 ${health.feedItems} 条信息流数据，但**没有一条带点赞数**——缺失字段默认放行。「进阶 → 精确过滤」可使用页面已有数据与本地缓存；补充实时详情须另行开启「允许补充联网取数」，默认关闭以减少风控风险。`;
 }
 
 // 中性说明（不是警告，不进控制台报警）：解释「为什么某些计数是 0」，免得用户误以为坏了。

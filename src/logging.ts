@@ -1,5 +1,6 @@
 // 统一日志 + 错误边界。debug 关时 log 零开销；logErr 始终输出，便于线上排查。
 import { CONFIG } from './config';
+import { APP_NAME } from './constants';
 
 export const BADGE = 'color:#fff;background:#fb7299;padding:0 4px;border-radius:3px'; // 控制台日志的品牌徽标样式
 
@@ -8,12 +9,12 @@ export const BADGE = 'color:#fff;background:#fb7299;padding:0 4px;border-radius:
 export function log(...args: unknown[]): void {
   if (!CONFIG.debug) return;
   const out = args.length === 1 && typeof args[0] === 'function' ? [(args[0] as () => unknown)()] : args;
-  console.log('%c[biliHoyoFairy]%c', BADGE, 'color:inherit', ...out);
+  console.log(`%c[${APP_NAME}]%c`, BADGE, 'color:inherit', ...out);
 }
 
 export function logErr(where: string, e: unknown): void {
   try {
-    console.warn(`%c[biliHoyoFairy]%c ${where}`, BADGE, 'color:#e74c3c', e);
+    console.warn(`%c[${APP_NAME}]%c ${where}`, BADGE, 'color:#e74c3c', e);
   } catch (_) {
     /* 控制台不可用时静默 */
   }

@@ -49,6 +49,10 @@ export const CELL_CONTAINERS = [
 export const UNSAFE_HIDE_CONTAINERS = '.container, .feed2, .bili-feed4, #i_cecream, #app, .bili-header';
 // 首页顶部轮播 banner：结构特殊且非信息流内容，扫描时整块跳过。
 export const SWIPE_BANNER = '.recommended-swipe';
+export const HOME_RECOMMEND_CONTAINER = '.recommended-container_floor-aside';
+export const SEARCH_VIDEO_CONTAINER = '.video-list'; // 普通搜索视频及用户卡片内的投稿预览
+export const HOME_ROLL_BUTTON = '.roll-btn';
+export const HOME_FULL_REFRESH = '.flexible-roll-btn-inner';
 
 // —— 卡片字段抽取（按优先级顺序尝试，取第一个有文本的）——
 export const CARD_TITLE_SELECTORS = [

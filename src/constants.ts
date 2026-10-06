@@ -3,6 +3,7 @@
 // 单一来源：直接读脚本头 @version，避免与常量双写漂移。
 export const VERSION: string =
   (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '0.0.1';
+export const APP_NAME = 'biliHoyoFairy-MX703';
 
 export const STORE_KEY = 'bfb_config_v2';
 // 存档解析失败时原始内容另存到这里等人工抢救。不带版本号——它本来就没有可信的结构版本。
@@ -21,6 +22,13 @@ export const SHRINK_ALERT_MIN = 5;
 export const SCHEMA_VERSION = 1;
 // 订阅拉取结果缓存：{ [url]: { meta, rules, lastSync, ok, count, error } }
 export const SUB_STORE_KEY = 'bfb_subs_v1';
+// WebDAV 凭据独立于配置保存：普通导出、订阅文件与云端备份内容都不会夹带密码。
+export const WEBDAV_SETTINGS_KEY = 'bfb_webdav_v1';
+// 被动获得的精简元数据与补充请求预算；不进入规则备份。
+export const METADATA_KEY = 'bfb_metadata_v1';
+export const REQUEST_BUDGET_KEY = 'bfb_request_budget_v1';
+// 右下角角标的用户拖拽位置。属于本机界面偏好，不进入 CONFIG 或配置导出。
+export const BADGE_POSITION_KEY = 'bfb_badge_position_v1';
 export const BLACKLIST_MANAGE_URL = 'https://account.bilibili.com/account/blacklist';
 
 // DOM 标记属性（集中常量，避免散落硬编码改一处漏一处）。

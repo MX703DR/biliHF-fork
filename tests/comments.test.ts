@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { CONFIG, DEFAULT_CONFIG } from '../src/config';
 import { rebuildRules } from '../src/match/engine';
-import { readCmt, matchComment, asCommentHost } from '../src/comments';
+import { readCmt, matchComment, asCommentHost, resolveReplyTarget } from '../src/comments';
 import type { CmtInfo, CommentHost } from '../src/comments';
 import { h, El } from './helpers/dom';
 
@@ -22,6 +22,9 @@ const host = (stub: HostStub): CommentHost => stub as CommentHost;
 const cmt = (over: Partial<CmtInfo> = {}): CmtInfo => ({
   uname: '',
   mid: undefined,
+  rpid: undefined,
+  parentId: undefined,
+  replyToUname: '',
   level: null,
   noface: false,
   message: '',
@@ -37,6 +40,7 @@ describe('readCmt：从 __data 抽取', () => {
     for (const c of [readCmt(null), readCmt(undefined), readCmt(host({}))]) {
       expect(c.uname).toBe('');
       expect(c.message).toBe('');
+      expect(c.replyToUname).toBe('');
       expect(c.level).toBe(null);
       expect(c.members).toEqual([]);
       expect(c.isUpTop).toBe(false);
@@ -59,6 +63,21 @@ describe('readCmt：从 __data 抽取', () => {
     expect(c.level).toBe(3);
     expect(c.message).toBe('你好');
     expect(c.members.length).toBe(1);
+  });
+
+  it('按 B 站真实格式提取楼中楼被回复者，用户名可含空格', () => {
+    const c = readCmt(
+      host({
+        __data: {
+          rpid: '300',
+          parent: '200',
+          content: { message: '回复 @带 空格的名字 :正文', members: [{ mid: '9', uname: '带 空格的名字' }] },
+        },
+      })
+    );
+    expect(c.rpid).toBe('300');
+    expect(c.parentId).toBe('200');
+    expect(c.replyToUname).toBe('带 空格的名字');
   });
 
   it('等级不是数字（缺字段/字符串）→ null，而不是 NaN 或 0', () => {
@@ -122,6 +141,25 @@ describe('matchComment：黑名单各维度', () => {
     expect(matchComment(cmt({ uname: 'spambot2' }), false)).toBe(null); // 精确匹配，不是包含
   });
 
+  it('可隐藏回复评论用户黑名单成员的楼中楼；开关默认关闭且普通 @ 不误判', () => {
+    CONFIG.comment.userNames.push('Blocked User');
+    rebuildRules();
+    const reply = cmt({ message: '回复 @Blocked User :说得对', replyToUname: 'Blocked User' });
+    expect(matchComment(reply, true)).toBe(null);
+    CONFIG.comment.hideRepliesToBlockedUsers = true;
+    expect(matchComment(reply, true)).toBe('回复已屏蔽用户:Blocked User');
+    expect(matchComment(cmt({ message: '@Blocked User 你看', members: [{ uname: 'Blocked User' }] }), true)).toBe(null);
+    expect(matchComment(reply, false)).toBe(null);
+  });
+
+  it('直接回复没有“回复 @”前缀时，按 parent rpid 找到被回复者', () => {
+    const directReply = cmt({ parentId: 200, message: '正文没有回复前缀' });
+    expect(resolveReplyTarget(directReply, new Map([['200', '黑名单用户']]))).toBe('黑名单用户');
+    expect(resolveReplyTarget(directReply, new Map())).toBe('');
+    const nestedReply = cmt({ parentId: 201, replyToUname: '前缀里的用户' });
+    expect(resolveReplyTarget(nestedReply, new Map())).toBe('前缀里的用户');
+  });
+
   it('昵称关键词（含正则）', () => {
     CONFIG.comment.userNameKeywords.push('代刷', '/^小号\\d+$/');
     rebuildRules();
@@ -136,11 +174,12 @@ describe('matchComment：黑名单各维度', () => {
     expect(matchComment(cmt({ message: '加群领资料' }), false)).toBe('评论关键词');
   });
 
-  it('楼中楼剥掉「回复 @某人:」前缀后再匹配；一级评论不剥（它本没有这种前缀）', () => {
+  it('楼中楼剥掉「回复 @某人 :」前缀后再匹配；一级评论不剥（它本没有这种前缀）', () => {
     CONFIG.comment.keywords.push('回复');
     rebuildRules();
     expect(matchComment(cmt({ message: '回复 @某人: 说得对' }), true)).toBe(null);
     expect(matchComment(cmt({ message: '回复 @某人: 说得对' }), false)).toBe('评论关键词');
+    expect(matchComment(cmt({ message: '回复 @名字 有空格 : 说得对' }), true)).toBe(null);
   });
 
   it('@提及本身不参与匹配（否则会被「被 @ 者的昵称」误伤）', () => {

@@ -28,6 +28,7 @@ export interface CardInfo {
   likes: number | null;
   isLive: boolean;
   isAd: boolean;
+  isDynamic?: boolean;
 }
 
 interface DetectFlags {
@@ -179,6 +180,7 @@ export function normDynamicItem(it: any): CardInfo | null {
     likes: null,
     isLive: it.type === 'DYNAMIC_TYPE_LIVE_RCMD' || !!major.live_rcmd,
     isAd: false,
+    isDynamic: true, // 动态作者不一定是视频 owner，不能写入按 BV 缓存的作者字段
   };
 }
 
@@ -187,27 +189,27 @@ export function normDynamicItem(it: any): CardInfo | null {
 export function normFeedItem(it: any): CardInfo | null {
   if (!it || typeof it !== 'object') return null;
   const goto = it.goto || it.card_goto || '';
-  const owner = it.owner || {};
-  const stat = it.stat || {};
+  const owner = it.owner || (typeof it.author === 'object' && it.author) || it.upper || {};
+  const stat = it.stat || it.stats || {};
   // 广告项标题/落地页常埋在 ad_info / cm 里，尽量抠出来，便于在屏蔽记录里辨识
-  const ad = it.ad_info || it.cm_info || it.cm || null;
-  const adC = (ad && (ad.creative_content || ad.creative)) || {};
+  const ad = it.ad_info || it.cm_info || it.cm || it.biz_data?.ad_content || null;
+  const adC = (ad && (ad.creative_content || ad.creative || ad.extra?.card)) || {};
   // 搜索结果的 title 内含 <em class="keyword"> 高亮标签，去标签后再匹配（其它接口无标签，无副作用）
-  const rawTitle = it.title || adC.title || adC.description || ad?.title || '';
+  const rawTitle = it.title || adC.title || adC.dynamic_text || adC.description || ad?.title || '';
   return {
     title: String(rawTitle || '').replace(/<[^>]*>/g, ''), // String()：接口偶发非字符串 title 时不抛错
-    up: owner.name || it.author || it.name || (ad && ad.source_content && ad.source_content.name) || '',
+    up: owner.name || owner.uname || (typeof it.author === 'string' ? it.author : '') || it.name || (ad && ad.source_content && ad.source_content.name) || '',
     uid: owner.mid != null ? String(owner.mid) : it.mid != null ? String(it.mid) : '',
     // 只认真正的分区字段。曾经兜底取过 rcmd_reason.content，但那是「已关注 / 高播放」这类**推荐理由**，
     // 不是分区；混进来会让 `分区:` 规则和 `part:` 关键词莫名其妙地匹配上推荐角标。
     // JSON 这一路本来就拿得到权威的 tname/typename，没有理由降级去用一个语义不同的字段。
     partition: it.tname || it.typename || '',
     bvid: it.bvid || '',
-    link: it.uri || it.jump_url || adC.url || adC.jump_url || '',
+    link: it.uri || it.url || it.arcurl || it.jump_url || adC.url || adC.jump_url || '',
     duration: typeof it.duration === 'number' ? it.duration : it.duration ? parseDuration(it.duration) : null,
     views: stat.view != null ? stat.view : stat.play != null ? stat.play : it.play != null ? it.play : null,
     likes: stat.like != null ? stat.like : null, // 点赞数（feed JSON 才有；用于营销号低赞率识别）
     isLive: goto === 'live',
-    isAd: goto === 'ad' || goto === 'cm' || !!it.ad_info || !!it.is_ad,
+    isAd: goto === 'ad' || goto === 'cm' || !!it.ad_info || !!it.is_ad || !!it.isAd || !!it.biz_data?.is_ad_loc || /^video_ad_/.test(it.type || ''),
   };
 }

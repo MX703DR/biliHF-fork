@@ -1,10 +1,10 @@
 // 「何时扫描」的调度策略（「扫描什么」在 dom.ts）。两个阶段诉求不同：
 //   首屏解析中：首页是 SSR，卡片由解析器一张张吐出来，必须赶在这一帧绘制前判定，否则会先闪再消失 → rAF 合批
 //   首屏之后：只有无限滚动新增卡，晚几十毫秒无人察觉 → 250ms 节流
-// 刻意不用「先 CSS 蒙住 feed、判完再放出来」：那要赌脚本不出错，本层一抛异常用户就对着空白首页。
-// 现方案只隐藏肯定命中的卡，脚本挂掉退化成「不过滤」而非「看不见内容」。
+// 已知 SSR 首屏由 initial-data 的有界闸门处理；本层只兜底未知/复用的 DOM 节点。
+// 新卡先判定再绘制，已显示卡只在规则变化时重判，不先全体显示再隐藏。
 
-import { scanAll } from './dom';
+import { scanAll, scanAddedNode, inspectChangedCard } from './dom';
 import { addShadowRoot, pruneShadowRoots, setShadowRootHandler } from './shadow';
 import { isCommentTag } from './selectors';
 import { scheduleCommentScan } from './comments';
@@ -75,11 +75,15 @@ export function startScanner(): void {
   const observer = new MutationObserver(
     safe('observer', (muts: MutationRecord[]) => {
       let touched = false;
+      const changedCards = new Set<HTMLElement>();
       for (const m of muts) {
+        inspectChangedCard(m.target, changedCards);
+        if (m.type === 'attributes' || m.type === 'characterData') touched = true;
         if (!m.addedNodes || !m.addedNodes.length) continue;
         touched = true;
         for (const n of m.addedNodes) {
           const el = n as Element;
+          scanAddedNode(n);
           // 插入时已挂着 shadowRoot 的节点（先 attachShadow 后 append）
           if (n.nodeType === 1 && el.shadowRoot && el.id !== 'bfb-overlay-host') addShadowRoot(el.shadowRoot);
         }
@@ -91,7 +95,8 @@ export function startScanner(): void {
   );
   // 观察 document 本身而非 <html>/<body>：document-start 时 body 一定不存在，
   // 观察 Document 节点没有这个前提，避免「元素还没生成 → 观察器没装上 → DOM 层整层静默失效」。
-  observer.observe(document, { childList: true, subtree: true });
+  const observeOptions = { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['href', 'title', 'data-mid', 'data-up-mid'] };
+  observer.observe(document, observeOptions);
 
   // 每个 shadow root 单独观察：影子树内部的变动不冒泡到 document 级观察器。
   // 注册要在任何采集之前——setShadowRootHandler 会对已收集的 root 补跑。
@@ -102,7 +107,7 @@ export function startScanner(): void {
   setShadowRootHandler((root) => {
     const target = root.host && isCommentTag(root.host.tagName) ? cmtObserver : observer;
     try {
-      target.observe(root, { childList: true, subtree: true });
+      target.observe(root, target === observer ? observeOptions : { childList: true, subtree: true });
     } catch (e) {
       /* 个别 root 观察失败不影响其它 */
     }

@@ -13,3 +13,8 @@ Thumbs.db
 *.log
 .vscode/
 .idea/
+
+# 浏览器验证的本地会话与证据（不发布）
+.playwright-cli/
+output/playwright/
+output/npm-cache/

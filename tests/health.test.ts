@@ -10,6 +10,7 @@ function reset() {
   health.cardsSeen = 0;
   health.signedSkipped = 0;
   health.feedLikes = 0;
+  health.initialParsed = health.initialItems = health.initialKept = health.feedKept = health.pendingFilters = health.pendingResponses = 0;
 }
 
 describe('health.noteRequest', () => {
@@ -67,18 +68,20 @@ describe('healthReport 不误报', () => {
     expect(w[0]).toContain('接口路径可能已变更');
   });
 
-  it('命中了但取不出列表 → 报警（结构变更）', () => {
+  it('请求结束仍取不出列表 → 提示网络 / 风控 / 结构问题', () => {
     health.noteRequest('https://api.bilibili.com/x/web-interface/index/top/feed/rcmd');
     health.feedMatched = 1;
     health.cardsSeen = 28;
     const w = healthReport();
     expect(w).toHaveLength(1);
-    expect(w[0]).toContain('返回结构可能已变更');
+    expect(w[0]).toContain('接口返回结构变更');
+    expect(w[0]).toContain('网络及风控');
   });
 
   it('一张卡都没识别到 → 报警（选择器失效）', () => {
     health.feedMatched = 1;
     health.feedParsed = 1;
+    health.feedKept = 1;
     expect(healthReport().some((x) => x.includes('卡片选择器'))).toBe(true);
   });
 
@@ -157,8 +160,25 @@ describe('healthDegraded：角标该不该变黄', () => {
     health.feedLike = 3;
     health.feedMatched = 3;
     health.feedParsed = 3;
+    health.feedKept = 12;
     health.cardsSeen = 0;
     expect(healthDegraded()).toBe(true);
+  });
+  it('数据层全部删掉/合法空列表，不把零 DOM 卡片误报为失效', () => {
+    markHealthReady(); health.cardsSeen = 0; health.feedMatched = 1; health.feedParsed = 1; health.feedKept = 0;
+    expect(healthDegraded()).toBe(false); expect(healthReport()).toEqual([]);
+  });
+  it('仍在渲染前等待元数据，不提前报结构/选择器失效', () => {
+    markHealthReady(); health.cardsSeen = 0; health.feedMatched = 1; health.feedParsed = 0; health.pendingFilters = 1;
+    expect(healthDegraded()).toBe(false); expect(healthReport()).toEqual([]);
+  });
+  it('慢网速响应尚未返回时不误报管线损坏', () => {
+    markHealthReady(); health.cardsSeen = 0; health.feedMatched = 1; health.pendingResponses = 1;
+    expect(healthDegraded()).toBe(false); expect(healthReport()).toEqual([]);
+  });
+  it('首屏状态已全部过滤，不要求它再渲染 DOM 卡片来证明过滤成功', () => {
+    markHealthReady(); health.cardsSeen = 0; health.initialParsed = 1; health.initialItems = 10; health.initialKept = 0;
+    expect(healthDegraded()).toBe(false); expect(healthReport()).toEqual([]);
   });
 });
 

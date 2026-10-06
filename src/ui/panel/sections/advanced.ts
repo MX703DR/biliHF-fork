@@ -31,7 +31,7 @@ export const advancedSection: PanelSection = {
           <td><input type="number" id="bfb-dmax" min="0" step="1"><span class="u">秒</span></td>
         </tr>
       </table>
-      <div class="hint">留空或 0 = 该项不启用。三项<b>各自独立</b>，任一命中即屏蔽；同一行两端都填则表示「区间之外的屏蔽」。<br>⚠ <b>点赞数</b>需要额外说明：B 站的卡片上并不显示点赞数。信息流接口<b>有时</b>会带这个字段、有时不带（各接口不一，也会变），带的时候刷新后即可生效；<b>不带的时候这两条规则在信息流上是不生效的</b>。要让它们稳定生效，请打开下方的<b>「精确过滤」</b>——它会按需读取视频详情把点赞数补齐，对所有页面、包括已经显示出来的卡片都有效。当前接口到底给没给，看「工具 → 🩺 运行自检」里的「其中带点赞数 N」。</div>`;
+      <div class="hint">留空或 0 = 该项不启用。三项<b>各自独立</b>，任一命中即屏蔽；同一行两端都填则表示「区间之外的屏蔽」。<br>点赞数优先使用页面已有响应。开启下方「精确过滤」也可使用本地元数据缓存；缺失字段默认放行，不逐视频联网、不在卡片显示后迟到隐藏。当前接口是否带点赞数，可在「工具 → 运行自检」查看。</div>`;
     host.appendChild(num);
     const numOpts = { number: true, after: rescanAfterRuleChange };
     bindControl(num, 'bfb-minviews', CONFIG.block, 'minViews', numOpts);
@@ -66,9 +66,11 @@ export const advancedSection: PanelSection = {
     api.innerHTML = `
       <label>🛰 精确过滤</label>
       <div class="switch"><input type="checkbox" id="bfb-api"> <b>启用精确过滤</b></div>
-      <div class="hint">按需读取视频标签、UP 简介等数据来判断，命中时会略有延迟；不开启则完全不联网。</div>
+      <div class="hint">使用页面原本加载的标签、UP 简介、详情及本地缓存，在显示前判定。默认不额外访问 B 站，缺失字段放行；缓存最长保留 7 天（简介 1 天），不随规则备份上传。</div>
       <div id="bfb-api-body" style="margin-top:6px">
         <div class="switch"><input type="checkbox" id="bfb-charging"> 屏蔽充电专属视频</div>
+        <div class="switch"><input type="checkbox" id="bfb-metadata-network"> 允许补充联网取数（默认关闭）</div>
+        <div class="hint">仅在缺少字段时取数：串行、间隔至少 1 秒，最多 6 次/分钟、60 次/24 小时；到限或超时放行。可能增加风控风险。该授权不随配置导入或云端恢复开启；手动账号拉黑所需解析不受此开关影响。</div>
       </div>`;
     host.appendChild(api);
     const apiBody = q(api, '#bfb-api-body');
@@ -84,6 +86,7 @@ export const advancedSection: PanelSection = {
       },
     });
     bindControl(api, 'bfb-charging', CONFIG, 'hideCharging', { after: rescanAfterRuleChange });
+    bindControl(api, 'bfb-metadata-network', CONFIG, 'allowMetadataRequests', { after: rescanAfterRuleChange });
     syncApiBody();
   },
 };

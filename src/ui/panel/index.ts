@@ -2,7 +2,7 @@
 //
 // 这里只负责「骨架」与「顺序」，每个分区的内容都在 ./sections/*。想加一个新分区，
 // 写一个 { tab, render(host, ctx) } 模块并加进下面的 SECTIONS 数组即可，不必再动这个文件的其它部分。
-import { VERSION } from '../../constants';
+import { APP_NAME, VERSION } from '../../constants';
 import { pageType } from '../../page';
 import { setStatsRefresh, runStatsRefresh, hasStatsRefresh, q } from './ctx';
 import type { PanelCtx, PanelGroups, PanelSection } from './ctx';
@@ -16,6 +16,7 @@ import { presetsSection } from './sections/presets';
 import { regexTesterSection } from './sections/regex-tester';
 import { ioSection } from './sections/io';
 import { backupsSection } from './sections/backups';
+import { webdavSection } from './sections/webdav';
 import { nameListSection } from './sections/name-list';
 import { subscriptionsSection } from './sections/subscriptions';
 import { batchBlockSection } from './sections/batch-block';
@@ -46,6 +47,7 @@ const SECTIONS: PanelSection[] = [
   regexTesterSection,
   ioSection,
   backupsSection, // 紧跟导入导出：都是「配置的保存与找回」，放一块儿用户才想得起来它
+  webdavSection,
   nameListSection,
   subscriptionsSection,
   batchBlockSection,
@@ -75,7 +77,7 @@ function buildPanel(): HTMLElement {
   p.id = 'bfb-panel';
   p.tabIndex = -1; // 可编程聚焦：打开时把焦点移入面板，便于键盘操作
   p.setAttribute('role', 'dialog');
-  p.setAttribute('aria-label', 'biliHoyoFairy 设置');
+  p.setAttribute('aria-label', `${APP_NAME} 设置`);
   // 拦住面板输入框的键盘事件，别冒泡到 B 站全局「按键即搜索」快捷键
   ['keydown', 'keypress', 'keyup', 'input'].forEach((ev) => {
     p.addEventListener(ev, (e: Event) => {
@@ -101,7 +103,7 @@ function renderPanel(p: HTMLElement) {
   p.innerHTML = '';
   setStatsRefresh(null); // 旧的刷新器指向已销毁的节点，log section 会在下面重新注册
   const h2 = document.createElement('h2');
-  h2.innerHTML = `🛡 biliHoyoFairy · 抗击黑潮 <small style="font-weight:normal;opacity:.6;font-size:12px">v${VERSION} · ${pageType()}</small> <span class="x" role="button" tabindex="0" aria-label="关闭设置面板">✕</span>`;
+  h2.innerHTML = `🛡 ${APP_NAME} <small style="font-weight:normal;opacity:.6;font-size:12px">v${VERSION} · ${pageType()}</small> <span class="x" role="button" tabindex="0" aria-label="关闭设置面板">✕</span>`;
   p.appendChild(h2);
   const xBtn = q(h2, '.x');
   xBtn.onclick = closePanel;

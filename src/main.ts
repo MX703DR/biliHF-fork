@@ -2,13 +2,16 @@
 // 接线各模块的注入 seam（面板回调 / stats 监听 / 规则变更 / 卡片检测开关），注册菜单命令与 MutationObserver。
 // 业务逻辑全部在各 src 模块；本文件只负责装配。
 // bootstrap 只依赖各模块的「入口/接线」符号；其余模块经依赖图传递性加载（无需在此直接 import）。
-import { VERSION, BLACKLIST_MANAGE_URL, STARTUP_SUMMARY_MS } from './constants';
+import { APP_NAME, VERSION, BLACKLIST_MANAGE_URL, STARTUP_SUMMARY_MS } from './constants';
 import { CONFIG, configRescue, saveConfig, installConfigSync, setConfigNotifier } from './config';
 import { safe, logErr, BADGE } from './logging';
 import { healthReport, markHealthReady, setTimingEnabled } from './health';
 import { configureCardDetect } from './cardinfo';
 import { pageType } from './page';
 import { installNetworkHooks } from './net';
+import { installInitialStateHooks } from './initial-data';
+import { installHomeRefresh } from './home-refresh';
+import { installHomeGrid } from './home-grid';
 import { addShadowRoot, harvestShadowRoots } from './shadow';
 import { sessionBlocked, tallyLog, setStatsListener } from './stats';
 import { updateBadge, toast } from './ui/toast';
@@ -25,8 +28,8 @@ import { openPanel, refreshPanelIfOpen, refreshStatsIfOpen } from './ui/panel';
 /*
  * 架构（拦截优先 + DOM 兜底）：
  *   1. 拦截层（主）：document-start hook fetch/XHR，把命中规则的项从响应 JSON 里删掉——
- *      页面只渲染保留项，无遮罩、无闪烁，且不重发请求、不需 WBI、不触发风控。
- *   2. DOM 兜底（薄）：首屏 SSR 漏网、需联网取数的进阶维度、搜索热搜词。
+ *      默认只用原生响应与本地元数据缓存；明确授权的补充取数也在响应交还前完成，不改 WBI 签名。
+ *   2. SSR 首屏在绘制前判定，hydrate 后通过原生 store 合批提交；DOM 仅兜底和重判已显示卡片。
  *   3. 两层共用同一套 matchRule + 维度注册表，数据源不同、判定一致。
  *   4. 一键拉黑写入账号黑名单，刷新后不再被推荐。
  */
@@ -95,7 +98,7 @@ import { openPanel, refreshPanelIfOpen, refreshStatsIfOpen } from './ui/panel';
   /* ===================== 3. 启动 ===================== */
   function start() {
     console.log(
-      `%c[biliHoyoFairy]%c v${VERSION} 已启动 | 页面:${pageType()} | 拦截:${CONFIG.enabled ? '开' : '关'}${CONFIG.debug ? ' | 调试' : ''}`,
+      `%c[${APP_NAME}]%c v${VERSION} 已启动 | 页面:${pageType()} | 拦截:${CONFIG.enabled ? '开' : '关'}${CONFIG.debug ? ' | 调试' : ''}`,
       BADGE + ';font-weight:bold',
       'color:#fb7299'
     );
@@ -163,17 +166,20 @@ import { openPanel, refreshPanelIfOpen, refreshStatsIfOpen } from './ui/panel';
       CONFIG.enabled = !CONFIG.enabled;
       saveConfig();
       updateBadge();
-      if (CONFIG.enabled) scanAll();
+      rescanAfterRuleChange();
     });
     GM_registerMenuCommand('打开官方黑名单管理页', () => window.open(BLACKLIST_MANAGE_URL, '_blank'));
   }
 
   // 拦截层必须尽早安装（document-start，先于页面脚本发起请求 / 构建评论组件）
+  installHomeGrid();
+  installInitialStateHooks(scanAll);
   installNetworkHooks();
+  installHomeRefresh();
   installShadowHook();
   // DOM 兜底层的**扫描**同样要尽早：首页首屏是 SSR，卡片由解析器一张张吐出来，
   // 拦截层（改 JSON）够不着，等 DOMContentLoaded 再扫它们早就绘制出来了。
-  // 只隐藏肯定命中的卡，故不存在「脚本挂了 → 空白首页」的失败模式。
+  // 已知 SSR 列表由 initial-data 的有界闸门保护；其它节点在绘制前判定，出错时放行。
   startScanner();
 
   // 其余 DOM 相关启动（事件监听 / 评论 / 菜单 / 汇总）延迟到文档就绪

@@ -4,22 +4,22 @@ import { CONFIG } from '../config';
 import { healthDegraded } from '../health';
 import { sessionBlocked } from '../stats';
 import { openPanel } from './hooks';
+import { installBadgeDrag } from './badge-drag';
 
 export function updateBadge(): void {
   let b = document.getElementById('bfb-badge');
   if (!b) {
     b = document.createElement('div');
     b.id = 'bfb-badge';
-    b.title = '点击打开设置';
-    b.onclick = openPanel;
     document.body.appendChild(b);
+    installBadgeDrag(b, openPanel);
   }
   b.classList.toggle('off', !CONFIG.enabled);
   // 拦截管线疑似失效时角标变黄。不弹 toast——误报的代价是骚扰所有人，而变色是零打断的提示：
   // 平时粉的东西今天黄了，足以让人点开看一眼，这正是「静默失效」最缺的那一环。
   const degraded = CONFIG.enabled && healthDegraded();
   b.classList.toggle('warn', degraded);
-  b.title = degraded ? '⚠ 拦截可能已失效，点开看「工具 → 🩺 运行自检」' : '点击打开设置';
+  b.title = degraded ? '⚠ 拦截可能已失效，点击查看运行自检；拖拽可移动' : '点击打开设置；拖拽可移动';
   b.textContent = CONFIG.enabled ? `${degraded ? '⚠' : '🛡'} 已拦截 ${sessionBlocked}（共${CONFIG.blockedCount}）` : '🛡 已暂停';
 }
 
@@ -64,6 +64,7 @@ export interface ToastAction {
 // kind 决定左侧色条（默认 info=原样）：success 绿 / warn 橙 / error 红，便于一眼区分操作结果。
 // action：可选行内按钮（如「撤销」）；带 action 时默认延长停留到 8s，给用户反应时间。
 export function toast(msg: string, kind: ToastKind = 'info', action?: ToastAction, ms?: number): void {
+  if (!CONFIG.showNotifications) return;
   const t = document.createElement('div');
   t.className = 'bfb-toast' + (kind !== 'info' ? ' ' + kind : '');
   t.title = '点击关闭';

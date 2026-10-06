@@ -1,5 +1,6 @@
 // 配置：默认值 + 本地存储（GM）+ 载入合并 + 导入/导出。CONFIG 为全局共享单例（对象被各模块就地读写）。
 import {
+  APP_NAME,
   BACKUP_KEY,
   BACKUP_MAX,
   SAVE_DEBOUNCE_MS,
@@ -52,6 +53,7 @@ export interface CommentConfig {
   hideAd: boolean;
   hideCallBot: boolean;
   hideBot: boolean;
+  hideRepliesToBlockedUsers: boolean;
   allowUp: boolean;
   allowPin: boolean;
   allowMe: boolean;
@@ -69,7 +71,10 @@ export interface AppConfig {
   enabled: boolean;
   reviewMode: boolean;
   rightClickBlock: boolean;
+  invertShiftRightClick: boolean;
   cardHoverBtn: boolean;
+  showNotifications: boolean;
+  showRiskNotifications: boolean;
   fuzzyMatch: boolean;
   // 简繁归一：匹配前把繁体归到简体，「原神/原神」互通（单向，见 match/t2s.ts）。
   tradNorm: boolean;
@@ -80,6 +85,7 @@ export interface AppConfig {
   hideLiveCard: boolean;
   hideHotSearch: boolean;
   apiFilters: boolean;
+  allowMetadataRequests: boolean;
   hideCharging: boolean;
   boostFeedLoad: boolean;
   comment: CommentConfig;
@@ -104,7 +110,10 @@ export const DEFAULT_CONFIG: AppConfig = {
   enabled: true,
   reviewMode: false, // 审查模式：被拦视频不删/不隐，而是标记+就地放行，便于核对防误伤
   rightClickBlock: true,
+  invertShiftRightClick: false, // 默认 Shift+右键走原生菜单；开启后反转为普通右键原生、Shift+右键插件菜单
   cardHoverBtn: false, // 悬停卡片时显示快捷「拉黑」浮层按钮（独立浮层，不改 B 站卡片 DOM）
+  showNotifications: true, // 页面轻提示总开关；危险操作确认框不受它影响
+  showRiskNotifications: true, // 风控熔断仍始终生效；这里只控制是否弹 Toast
   fuzzyMatch: true, // 反绕过：普通关键词匹配前剔除分隔符（“原 神/原.神”也命中）；隐形字符始终剔除
   tradNorm: false, // 简繁归一（默认关：多数用户用不到，且要多建一张 2.8k 条的表）
   blacklistCollab: false, // 拉黑联合投稿时，是否把所有合作者一并拉黑
@@ -131,7 +140,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   hideAd: false,
   hideLiveCard: false, // 屏蔽信息流里的直播推荐卡（首页/动态里链向 live.bilibili.com 的卡）
   hideHotSearch: false,
-  apiFilters: false, // 精确过滤总开关（关闭时完全不联网）
+  apiFilters: false, // 元数据规则开关，优先使用页面已有数据和本地缓存
+  allowMetadataRequests: false, // 默认不逐视频补发接口；联网授权不参与规则导入/备份
   hideCharging: false, // 充电专属视频（API）
   boostFeedLoad: false, // 增大首页推荐每次请求的视频数（拦截层删项后仍保持信息流饱满）
   // —— 评论区过滤（独立一套，读评论组件 __data；仅在有评论的页面生效）——
@@ -147,6 +157,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     hideAd: false, // 带货/导流广告评论
     hideCallBot: false, // 召唤 AI 的评论
     hideBot: false, // AI 机器人发布的评论
+    hideRepliesToBlockedUsers: false, // 回复评论用户黑名单中用户的楼中楼评论
     allowUp: true, // 白名单：UP 主本人的评论免过滤
     allowPin: true, // 白名单：置顶评论免过滤
     allowMe: true, // 白名单：自己发布/被 @ 的评论免过滤
@@ -558,7 +569,7 @@ export function setUidName(uid: unknown, name: string): void {
 // ruleStats/ruleStatsSince 属于个人使用数据而非规则本身：别人的命中次数对你没有意义，
 // 更会让导入者的「死规则」判断建立在别人的浏览历史上。
 // disabled 属个人使用状态，且导入侧的 sanitizeConfigInput 本来就会丢掉它；列在这里是让两侧对称。
-export const NON_PORTABLE = ['blockedCount', 'uidNames', 'enabled', 'debug', 'reviewMode', 'subscriptions', 'ruleStats', 'ruleStatsSince', 'disabled', 'onboarded'];
+export const NON_PORTABLE = ['blockedCount', 'uidNames', 'enabled', 'debug', 'reviewMode', 'subscriptions', 'ruleStats', 'ruleStatsSince', 'disabled', 'onboarded', 'allowMetadataRequests'];
 // 把自己的黑名单导出成**订阅格式**文件（examples/blocklist.example.json 那个形状）。
 // 「我维护一份名单给别人订阅」此前要求会用 Git 手写 JSON，这一步把门槛降到「点一下」。
 // 只带订阅支持的 7 个黑名单维度——白名单/开关/数值阈值订阅侧本来就不收，导出了也是误导。
@@ -571,11 +582,11 @@ export function exportSubscription(title: string): string {
   }
   return JSON.stringify(
     {
-      app: 'biliHoyoFairy',
+      app: APP_NAME,
       format: 1,
       meta: {
         title: title || '我的名单',
-        description: '由 biliHoyoFairy 导出。托管到公开 URL（GitHub raw / Gist raw）后，别人在「工具 → 规则订阅」填入即可。',
+        description: `由 ${APP_NAME} 导出。托管到公开 URL（GitHub raw / Gist raw）后，别人在「工具 → 规则订阅」填入即可。`,
         version: new Date().toISOString().slice(0, 10),
         expires: '1d',
       },
@@ -589,7 +600,7 @@ export function exportSubscription(title: string): string {
 export function exportConfig(): string {
   const c: Record<string, any> = structuredClone(CONFIG);
   NON_PORTABLE.forEach((k) => delete c[k]);
-  return JSON.stringify({ app: 'biliHoyoFairy', version: VERSION, config: c }, null, 2);
+  return JSON.stringify({ app: APP_NAME, version: VERSION, config: c }, null, 2);
 }
 
 // 单个规则数组导入后的容量上限：防恶意/超大「规则文件」灌入无界列表拖垮匹配。

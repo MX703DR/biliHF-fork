@@ -5,6 +5,8 @@ import { CONFIG, scheduleStatsSave, setUidName } from './config';
 import { capMapSet } from './util';
 import { logErr } from './logging';
 import { toast } from './ui/toast';
+import { cachedMetadata, rememberMetadata } from './metadata-cache';
+import { takeMetadataRequest } from './request-budget';
 
 // 缓存容量上限（防长会话内存无界）：view/card 对象较大用 800，tag 较小用 1200。
 const VIEW_CACHE_MAX = 800;
@@ -33,14 +35,16 @@ export const riskGuard = {
     this.until = Date.now() + backoff;
     if (!wasBlocked) {
       logErr('风控熔断', `code ${code}，暂停联网 ${Math.round(backoff / 1000)}s`);
-      toast(`⚠️ 触发 B 站风控(code ${code})，已暂停联网 ${Math.round(backoff / 1000)} 秒以保护账号`, 'error');
+      if (CONFIG.showRiskNotifications) {
+        toast(`⚠️ 触发 B 站风控(code ${code})，已暂停联网 ${Math.round(backoff / 1000)} 秒以保护账号`, 'error');
+      }
     }
   },
 };
 
 type ApiCb = (data: any) => void;
 
-// 小并发 + 较短冷却：兼顾速度与风控。每个请求完成后冷却 DELAY 再释放并发位。
+// 补充取数需明确开启，且串行派发；每次结束至少冷却一秒。
 const API = {
   view: new Map<string, any>(),
   tag: new Map<string, any>(),
@@ -48,8 +52,8 @@ const API = {
   queue: [] as Array<(done: () => void) => void>,
   active: 0,
   waiting: false,
-  CONCURRENCY: 3,
-  DELAY: 120,
+  CONCURRENCY: 1,
+  DELAY: 1000,
 };
 
 function apiPump(): void {
@@ -127,9 +131,16 @@ function inCooldown(k: string): boolean {
 const inflight = new Map<string, ApiCb[]>();
 
 // 三个取数接口的公共骨架：命中缓存/冷却直接回调，否则入队请求并按上面的分流写缓存。
-function cachedGet(cache: Map<string, any>, cap: number, ns: string, key: string, url: string, pick: (j: any) => any, cb: ApiCb): void {
+function cachedGet(cache: Map<string, any>, cap: number, ns: string, key: string, url: string, pick: (j: any) => any, cb: ApiCb, deadline?: number, manual = false): void {
   if (!key) return cb(null);
   if (cache.has(key)) return cb(cache.get(key));
+  const local = cachedMetadata(ns === 'c:' ? '' : key, ns === 'c:' ? key : '');
+  const known = ns === 'v:' ? local.view : ns === 't:' ? local.tags : local.card;
+  // 手动联合投稿解析需要完整 staff，不能把推荐流的精简缓存冒充完整详情。
+  if (!manual && known && (ns !== 'v:' || !CONFIG.apiFilters || !CONFIG.allowMetadataRequests)) return cb(known);
+  if (!manual && (!CONFIG.apiFilters || !CONFIG.allowMetadataRequests)) return cb(null);
+  // 渲染前判定不能等熔断队列 60 秒；过期任务也不能在卡片已经放行后继续补发。
+  if (deadline !== undefined && (Date.now() >= deadline || riskGuard.blocked())) return cb(null);
   if (inCooldown(ns + key)) return cb(null);
   const flightKey = ns + key;
   const waiting = inflight.get(flightKey);
@@ -144,6 +155,11 @@ function cachedGet(cache: Map<string, any>, cap: number, ns: string, key: string
     for (const f of cbs) f(d);
   };
   apiEnqueue((done) => {
+    if ((deadline !== undefined && Date.now() >= deadline) || (!manual && (!CONFIG.apiFilters || !CONFIG.allowMetadataRequests || !takeMetadataRequest()))) {
+      settle(null);
+      done();
+      return;
+    }
     gmGet(url, (j) => {
       const code = j && typeof j.code === 'number' ? j.code : null;
       if (code === null || RISK_CODES.has(code)) {
@@ -152,6 +168,7 @@ function cachedGet(cache: Map<string, any>, cap: number, ns: string, key: string
       } else {
         const d = code === 0 ? pick(j) : null;
         capMapSet(cache, key, d, cap);
+        if (d) rememberMetadata(ns[0] as 'v' | 't' | 'c', key, d);
         settle(d);
       }
       done();
@@ -159,7 +176,7 @@ function cachedGet(cache: Map<string, any>, cap: number, ns: string, key: string
   });
 }
 
-export function fetchView(bvid: string, cb: ApiCb): void {
+export function fetchView(bvid: string, cb: ApiCb, deadline?: number, manual = false): void {
   // d.owner.mid 即可反查 uid（cachedUid），无需另设缓存
   cachedGet(API.view, VIEW_CACHE_MAX, 'v:', bvid, 'https://api.bilibili.com/x/web-interface/view?bvid=' + encodeURIComponent(bvid), (j) => j.data, (d) => {
     if (d && d.owner && d.owner.mid && d.owner.name && CONFIG.uidNames[String(d.owner.mid)] === undefined) {
@@ -167,10 +184,10 @@ export function fetchView(bvid: string, cb: ApiCb): void {
       scheduleStatsSave();
     }
     cb(d);
-  });
+  }, deadline, manual);
 }
 
-export function fetchTags(bvid: string, cb: ApiCb): void {
+export function fetchTags(bvid: string, cb: ApiCb, deadline?: number): void {
   cachedGet(
     API.tag,
     TAG_CACHE_MAX,
@@ -178,16 +195,17 @@ export function fetchTags(bvid: string, cb: ApiCb): void {
     bvid,
     'https://api.bilibili.com/x/web-interface/view/detail/tag?bvid=' + encodeURIComponent(bvid),
     (j) => (Array.isArray(j.data) ? j.data.map((x: any) => x.tag_name).filter(Boolean) : null),
-    cb
+    cb,
+    deadline
   );
 }
 
-export function fetchCard(mid: string, cb: ApiCb): void {
-  cachedGet(API.card, CARD_CACHE_MAX, 'c:', mid, 'https://api.bilibili.com/x/web-interface/card?mid=' + encodeURIComponent(mid), (j) => j.data, cb);
+export function fetchCard(mid: string, cb: ApiCb, deadline?: number): void {
+  cachedGet(API.card, CARD_CACHE_MAX, 'c:', mid, 'https://api.bilibili.com/x/web-interface/card?mid=' + encodeURIComponent(mid), (j) => j.data, cb, deadline);
 }
 
 // 从 view 缓存里同步取 uid（已请求过的 bvid 才有；否则返回空串）。
 export function cachedUid(bvid: string): string {
-  const d = bvid && API.view.get(bvid);
+  const d = bvid && (API.view.get(bvid) || cachedMetadata(bvid).view);
   return d && d.owner && d.owner.mid ? String(d.owner.mid) : '';
 }

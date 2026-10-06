@@ -7,12 +7,12 @@
 
 ## 1. 一句话
 
-biliHoyoFairy 是一个净化 B 站推荐流的油猴脚本。源码是 **TypeScript 多模块**（`src/`），经 **esbuild 打包成单文件** `biliHoyoFairy.user.js`（仓库根，供 Tampermonkey 安装/自动更新）。
+biliHoyoFairy-MX703 是一个净化 B 站推荐流的油猴脚本。源码是 **TypeScript 多模块**（`src/`），经 **esbuild 打包成单文件** `biliHoyoFairy.user.js`（保留原产物文件名与自动更新地址，仓库根，供 Tampermonkey 安装/自动更新）。
 
 **两层过滤模型**（核心心智）：
 
-1. **拦截层（主）**：`document-start` 时 hook `fetch`/`XHR`，在 B 站读取推荐 JSON 之前就把命中规则的项从数组里删掉 → 页面只渲染保留项（无遮罩、无留白、不重发请求、不触发风控）。
-2. **DOM 兜底层（薄）**：`MutationObserver` 处理拦截层覆盖不到的（首屏 SSR、需联网取数的进阶维度、评论区），命中即安全隐藏。观察器同样在 `document-start` 就装（`scanner.ts`）——首页首屏是 SSR，卡片由解析器一张张吐出来，拦截层改 JSON 够不着，等 `DOMContentLoaded` 再扫它们早就绘制出来了（会先闪一下再消失）。
+1. **数据层（主）**：`document-start` hook `fetch`/`XHR`，默认只用响应自带字段和本地被动元数据缓存，在发布响应之前一次性删掉命中项，不为补齐信息额外请求 B 站。缺少标签/分区/简介等字段时保守放行；用户明确开启“允许补充联网取数”后才可按需补齐。首屏 `__pinia` / `__INITIAL_STATE__` 的已知列表先判定、暂缓显示，等原生 hydrate 完成后通过真实 store 提交，避免状态与旧 HTML 错位；搜索的 shallowRef 需重赋根引用。首页原生 Vue 渲染适配在 DOM patch 前过滤推荐 VNode，并把站点自身的隐藏楼层占位转成原生骨架卡，避免加载期间的网格空洞。保留列表数组身份、剩余顺序和分页字段，不改 WBI 参数。
+2. **DOM 兜底层（薄）**：新增/复用卡片在 MutationObserver 微任务中判定；未知数据源的异步判定合批提交，新卡在完成前不绘制正文。规则变化只重判已显示卡片，不先把所有隐藏项显示出来。评论隐藏模式过滤响应，折叠/审查模式保留原文并在绘制前处理，以支持手动展开。
 3. **同一套规则**：两层共用 `matchRule` + 维度注册表，数据源不同、判定一致。
 4. **一键拉黑**：调官方 `relation/modify` 写账号黑名单，刷新后不再被推荐。
 
@@ -35,6 +35,8 @@ src/
 ├─ shadow.ts            开放 shadowRoot 注册表（评论/卡片穿透用）
 ├─ gm.ts                GM_xmlhttpRequest 的唯一出口（补 withCredentials 类型；环境不支持时返回 false）
 ├─ batch.ts             名单批量解析 parseNameList（粘贴的 UID/UP名 → 两组）
+├─ json-span.ts         已验证 JSON 的属性值文本定位；PiliNara 旧名单保留原顺序/原名字并末尾追加
+├─ webdav-directory.ts  DAV XML 目录解析、仓库 URL 归一化、同源与目录范围校验
 ├─ match/normalize.ts   文本归一 + 规则行编译 + 作用域关键词 + splitRuleInput（fuzzy 注入）
 ├─ subscriptions/parse.ts  订阅文本解析（JSON / uBlock 文本双格式）
 ├─ ui/hooks.ts          UI 回调注入桥（低层模块经它回调面板，避免 import 面板成环）
@@ -43,6 +45,9 @@ src/
 │
 │  ── L1~L3 状态 / 数据 / 副作用 ──
 ├─ config.ts            AppConfig 类型 + CONFIG 单例 + 存取/合并/导入导出（deepMerge 原型链防护）
+├─ webdav.ts            仓库目录/凭据隔离 + 自动建备份目录 + PiliNara 文件发现与去重追加
+├─ metadata-cache.ts    页面原生响应的精简被动缓存：有界、过期清理、跨页持久化，无主动请求
+├─ request-budget.ts    补充取数预算：跨页共享 6 次/分钟、60 次/24小时
 ├─ logging.ts           log / logErr / safe（错误边界）+ BADGE（传函数即惰性求值）
 ├─ health.ts            运行自检计数器 + healthReport/healthSummary（识别「静默失效」）
 ├─ cardinfo.ts          卡片信息抽取：DOM(extractCardInfo) 与接口(normFeedItem) 归一成同形 CardInfo
@@ -52,6 +57,13 @@ src/
 ├─ api.ts              接口层：风控熔断 riskGuard + 限速并发队列 + fetchView/Tags/Card
 ├─ match/engine.ts     ★匹配引擎：M/ruleVersion + 维度注册表 SYNC_DIMS/API_DIMS + matchRule/matchApi
 ├─ net.ts             ★拦截层：FEED_HOOKS + NET 管线 + filterFeedJson + fetch/XHR 钩子
+├─ net-xhr.ts           XHR 异步响应闸门：DONE/load/loadend 延后交付，支持取消与实例复用
+├─ video-filter.ts      统一视频判定：默认本地、可选补齐、8 秒批次期限、版本化结论与迟到隔离
+├─ comment-data.ts      评论响应列表过滤：父回复索引、置顶双副本、白名单、保留原始分页
+├─ initial-data.ts      SSR 首屏：raw/head、搜索/投稿预览、hydrate 接管、Pinia shallowRef、有界等待
+├─ initial-search.ts    视频搜索本地副本：经原生 submitSearch 一次回放同页 SSR 结果，不额外请求
+├─ home-refresh.ts      原“换一换”调用 B站原生完整刷新；过时在途批次不能回填
+├─ home-grid.ts         原生首页 Vue 渲染适配：DOM patch 前剪枝、原生骨架补占位、规则变更重判
 │
 │  ── L4~L5 领域 / DOM ──
 ├─ rules.ts             规则增删统一入口 addToList/removeFromList/pushUnique（改完发 events）
@@ -64,6 +76,7 @@ src/
 │
 │  ── L6+ UI ──
 ├─ ui/toast.ts          角标 updateBadge + 轻提示 toast
+├─ ui/badge-drag.ts     右下角角标 Pointer Events 拖拽 + 位置持久化与视口边界修正
 ├─ ui/field.ts          门面 → ui/field/{types,models,list,controls}.ts
 ├─ ui/listfilter.ts     名单搜索的判定部分（纯函数：普通词=包含、/.../ =正则；与渲染分开以便单测）
 ├─ ui/menu.ts           门面 → ui/menu/{locate,context,hover,shared}.ts
@@ -71,8 +84,8 @@ src/
 └─ ui/panel/            设置面板
    ├─ index.ts          面板外壳：Tab 骨架 + 分区注册表 SECTIONS（数组顺序=显示顺序）+ 开关/重渲
    ├─ ctx.ts            分区契约 PanelSection/PanelCtx（叶子：不 import 任何 section，也不 import index）
-   └─ sections/*.ts     14 个分区各自成文件：base / lists / advanced / comment / presets / regex-tester
-                        / io / name-list / subscriptions / batch-block / reset / health / rule-health / log
+   └─ sections/*.ts     分区各自成文件：base / lists / advanced / comment / presets / regex-tester / io
+                        / backups / webdav / name-list / subscriptions / batch-block / reset / health / rule-health / log
 ```
 
 ★ = 两处关键设计（匹配引擎、拦截层），改动前务必理解（见 §5 扩展点）。
@@ -85,12 +98,17 @@ src/
 
 ```
 L0 叶子   constants · util · page · selectors · events · presets · shadow · batch · gm
+          json-span · webdav-directory
           match/normalize · subscriptions/parse · ui/hooks · ui/panel.styles · ui/confirm
-L1        config
+L1        config · metadata-cache（cardinfo 仅类型依赖）· request-budget
 L2        logging · health · cardinfo · hotsearch
 L3        stats · subscriptions/store
 L4        ui/toast · match/engine
-L5        api · rules · subscriptions/refresh · net · comments · rulehealth
+L5        api · rules · subscriptions/refresh · comments · rulehealth（net-xhr 无内部依赖）
+L5.1      video-filter · comment-data
+L5.2      net
+L5.3      initial-data · initial-search（回放助手无内部依赖）
+L5.4      home-refresh · home-grid
 L6        ui/field · blacklist · dom
 L6.5      scanner（依赖 dom/shadow/logging；无人依赖它，仅 main 启动）
 L7        ui/menu
@@ -122,7 +140,7 @@ L9        main（bootstrap，装配一切）
 改 `match/engine.ts` 的 `SYNC_DIMS` 数组，push 一条 `{ match: (i: CardInfo) => 命中原因 | null }`。`matchRule` 会自动按序短路调用——**这一处加完即在拦截层和 DOM 层同时生效**。
 
 ### 加一个过滤维度（需要读接口）
-改 `match/engine.ts` 的 `API_DIMS`：`{ source, needs, active, match }`。`needs` 指明依赖哪个接口（tag/view/card），`active()` 决定是否真去拉取（省请求）。务必默认关闭、复用 `api.ts` 的缓存+限速。`apiNeeds`/`matchApi` 自动派生。
+改 `match/engine.ts` 的 `API_DIMS`：`{ source, needs, active, match }`。优先复用原生响应或 `metadata-cache.ts` 的已有字段；本地缓存缺失不能被解释成命中。`needs` 指明字段来源（tag/view/card），`active()` 决定维度是否启用。补充请求另受 `CONFIG.allowMetadataRequests` 的本机明确授权及 `api.ts` 的缓存、限速和预算约束。`apiNeeds`/`matchApi` 自动派生。
 
 ### 加一个预置规则
 改 `presets.ts` 的 `PRESET_LIBRARY`，加一条 `{ cat, name, desc, rules: { 维度: [...] } }`。面板预置库自动出现。
@@ -153,6 +171,9 @@ L9        main（bootstrap，装配一切）
 |---|---|
 | 某条规则怎么判命中 | `match/engine.ts`（SYNC_DIMS / API_DIMS）；文本匹配细节在 `match/normalize.ts` |
 | 拦截哪些接口/页面 | `net.ts`（FEED_HOOKS） |
+| 渲染前的精确过滤 / 超时与结论缓存 | `video-filter.ts`；XHR 事件闸门在 `net-xhr.ts` |
+| 首屏 SSR / 首页换一换 / 骨架空洞 | `initial-data.ts` / `home-refresh.ts` / `home-grid.ts` |
+| 默认本地元数据 / 补充请求预算 | `metadata-cache.ts` / `request-budget.ts` / `api.ts` |
 | 卡片信息怎么抠（标题/UP/UID…） | `cardinfo.ts` |
 | 默认配置 / 配置结构 | `config.ts` |
 | 设置面板长相/交互 | `ui/panel/sections/*.ts`（骨架与分区顺序在 `ui/panel/index.ts`；样式 `ui/panel.styles.ts`；列表字段组件 `ui/field.ts`） |
@@ -160,10 +181,11 @@ L9        main（bootstrap，装配一切）
 | 「脚本是不是失效了」自检 | `health.ts`（面板「工具 → 🩺 运行自检」+ 控制台首屏告警） |
 | 右键菜单 / 悬停按钮 | `ui/menu.ts` |
 | 一键/批量拉黑逻辑 | `blacklist.ts`（接口层在 `api.ts`） |
-| 评论区过滤 | `comments.ts` |
+| 评论区过滤 | `comment-data.ts`（数据）+ `comments.ts`（纯判定/折叠/审查） |
 | 风控/限速 | `api.ts`（riskGuard、队列） |
 | 预置词库 | `presets.ts` |
 | 订阅格式/刷新 | `subscriptions/{parse,store,refresh}.ts` |
+| WebDAV 配置备份 / PiliNara 自动发现 | `webdav.ts`（网络/清洗）+ `webdav-directory.ts`（DAV XML/范围校验）+ `json-span.ts`（名单文本保留）+ `ui/panel/sections/webdav.ts`（交互） |
 | 角标/提示文案 | `ui/toast.ts` |
 | 启动顺序/事件接线 | `main.ts` |
 | 什么时候扫描（首屏不闪 / 滚动节流） | `scanner.ts`（策略 `createScanScheduler` 可单测；扫描**内容**在 `dom.ts`） |
@@ -208,11 +230,19 @@ npm test           # vitest 纯逻辑单测
 
 ## 9. 不变量 / 红线
 
+- 默认不补充请求：开启精确规则不等于授权联网。缺字段时保守放行，等待用户正常浏览产生的原生响应补齐本地缓存；不得自动补足被过滤后的推荐数量。
+- 可选补充取数使用 `api.ts` 的 1 并发、至少 1 秒间隔、缓存与风控熔断，另受跨页共享 6 次/分钟、60 次/24小时预算约束。整批最多等待 8 秒；过期或已关闭开关的排队任务不能继续发请求。用户明确发起的账号黑名单操作仍可联网，不能把它当后台自动补齐。
+- 元数据缓存最多 1800 项，视频 7 天/UP 1 天过期；只保存白名单字段，不存 Cookie、完整响应、播放进度等个人状态，不进入配置备份。补充取数授权属于 `NON_PORTABLE`，导入/云端恢复不能替用户开启它。
+- 超时/熔断的本批结论为临时放行：迟到元数据不能隐藏已经显示的卡片；下一批响应可用新缓存重新判定。配置版本变化不能复用旧结论。
+- 首页完整刷新复用 B站 `.flexible-roll-btn-inner` 的原生 Refresh（实测 `fresh_type=5, fetch_row=1`），不复制 BewlyCat UI、不重签/修改请求；该入口缺失时整页刷新。刷新前在途旧批次清空返回列表，防止无限滚动旧结果回填。
+- 首页渲染适配只处理已识别的原生推荐组件。保留节点 key、ref、滚动观察锚点和响应式样式，不改全站布局；Vue 编译后的稳定 slot 必须转为动态 slot，避免旧占位被 slot 缓存继续复用。DOM 复用成 skeleton 时只撤销本插件自己的隐藏和标记。
+- 自检在原生请求仍在下载或过滤时不得提前报警；真实下载失败、结构失配仍须可观察。
+
 - **不要改 `constants.ts` 的 `STORE_KEY`**（会丢老用户本地配置）。
 - 产物**始终输出仓库根**单文件，保 `@updateURL` 自动更新链路；不引入 CDN/远程运行时加载。
 - 新增联网维度必须**默认关 + 缓存 + 限速**（防风控）。
 - **缓存/存档有界**：API `view/tag/card` 缓存用 `util.capMapSet` 限容；`CONFIG.uidNames` 软上限 5000。任何会随会话无界增长的结构都要设上限。
-- **DOM 观察器全量 `scanAll` 是有意为之**：单卡判定由 `PROCESSED` 短路，每批仅一次原生 `querySelectorAll`；增量化会牺牲 shadow/skeleton 覆盖，无 profiling 证据前不改。
+- **DOM 扫描保留全量兜底**：新增/内容复用节点先窄扫描以赶在绘制前判定，稳态 250ms 全量 `scanAll` 仍由 `PROCESSED` 短路，保障 shadow/skeleton 覆盖；不可只留增量扫描。
 - **确认对话框一律走 `ui/confirm.confirmModal`**（Promise<boolean>），不再用原生 `confirm()`；账号写/销毁类操作传 `danger:true`。新增确认入口请沿用，勿引回原生弹窗。
 - **账号拉黑必须可撤销**：拉黑成功要给撤销入口（toast 动作 / 屏蔽记录按钮），撤销走 `blacklist.unblockUp`（`relation/modify act=6`）。新增账号写操作同理。
 - **自有 UI 配色集中在 `ui/panel.styles.ts`**：新增表面要同时给暗色（`@media prefers-color-scheme:dark`）覆盖，说明性文字保证 WCAG AA（≥4.5:1）。
@@ -220,4 +250,6 @@ npm test           # vitest 纯逻辑单测
 - 第三方致谢集中在 README，勿散落代码注释。
 - **安全红线**（0.0.6 起）：`@connect` 只声明已知域（B 站 + 常见 CDN），不留 `*`；配置**导出与导入都剔除 `NON_PORTABLE`**（尤其 `subscriptions`，防分享文件注入自动联网 URL）；订阅/导入的 `/正则/` 受 `MAX_REGEX_LEN` 长度上限保护（防 ReDoS）。
 - **不可信配置必须过 `sanitizeConfigInput`**（0.0.8 起）：导入路径按 `DEFAULT_CONFIG` 的形状清洗，未知键 / 类型不符的值 / 数组里的非字符串元素一律丢弃。它**只用于导入，不用于 `loadConfig`**——`DEFAULT_CONFIG.uidNames` 是 `{}`、`subscriptions` 是 `[]`，拿它们当类型参照会把用户已存的缓存与订阅全部清空。已落盘的坏配置由消费侧的 `match/normalize.ruleLines` 兜底（规则数组的唯一入口）。
+- **WebDAV 凭据隔离**：界面仅需仓库目录 URL、用户名、密钥；自动在其下创建 `biliHoyoFairy-MX703/config.json`。地址、用户名和密码只写 `WEBDAV_SETTINGS_KEY`，不得进入 `CONFIG`、普通导出、订阅或远端备份正文；下载的备份与本地文件导入一样，必须先迁移、清洗并剔除 `NON_PORTABLE`。目录发现只允许仓库同源、直接子项，拒绝跨域/越界 DAV href。PiliNara 多设备文件必须选择目标，不自动覆盖第一项。
+- **PiliNara 只合并 UID**：写入前读完整文件，以远端 `localCache.recommendBlockedMids` 为基准去重并在末尾追加缺少项；保留原名单的文本顺序、名字及未知项，其他配置语义不变。没有新增项就不 PUT；有 ETag 时用 `If-Match` 防止并发静默覆盖；不能把 BV/AV 或账号 `blackMids` 写进推荐名单。
 - **账号写操作红线**：单条拉黑（右键/悬停）执行前必须二次确认；批量拉黑必须可停止、限速、风控自动退避；`doBlacklistMany` 批量本地屏蔽统一一次 `saveConfig+emitRulesChanged`（勿逐条重扫）。

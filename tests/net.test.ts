@@ -118,6 +118,26 @@ describe('filterFeedJson：按规则就地删项', () => {
     expect(filterFeedJson(URLS.related, json)).toBe(1);
     expect(json.data.length).toBe(1);
   });
+  it('搜索分组中的用户投稿预览也可屏蔽，但不能删除用户或更改分页计数', () => {
+    CONFIG.block.uids.push('7'); rebuildRules();
+    const user = { mid: 7, uname: 'UP', res: [{ bvid: 'BV1preview', title: '投稿' }] };
+    const json = { code: 0, data: { page: 2, numResults: 100, result: [{ result_type: 'bili_user', data: [user] }, { result_type: 'video', data: [] }] } };
+    expect(filterFeedJson(URLS.searchAll, json)).toBe(1); expect(user.res).toHaveLength(0);
+    expect(json.data.result[0].data[0]).toBe(user); expect(json.data.page).toBe(2); expect(json.data.numResults).toBe(100);
+  });
+  it('用户搜索的顶层用户条目不是视频，UID 黑名单不能误删它', () => {
+    CONFIG.block.uids.push('7'); rebuildRules();
+    const json = { code: 0, data: { result: [{ type: 'bili_user', mid: 7, uname: 'UP' }] } };
+    expect(filterFeedJson('https://api.bilibili.com/x/web-interface/wbi/search/type?search_type=bili_user', json)).toBe(0);
+    expect(json.data.result).toHaveLength(1);
+  });
+  it('搜索视频推广的空 title 从 biz_data 内取正文，不能漏过关键词或广告规则', () => {
+    const item = { type: 'video_ad_82', bvid: 'BV1ad', title: '', mid: 7, biz_data: { is_ad_loc: true, ad_content: { extra: { card: { title: '<em>原神</em>推广' } } } } };
+    CONFIG.block.keywords.push('原神'); rebuildRules();
+    expect(filterFeedJson(URLS.searchAll, { code: 0, data: { result: [item] } })).toBe(1);
+    CONFIG.block.keywords = []; CONFIG.hideAd = true; rebuildRules();
+    expect(filterFeedJson(URLS.searchAll, { code: 0, data: { result: [item] } })).toBe(1);
+  });
 
   it('分区规则命中排行榜的 tname', () => {
     CONFIG.block.partitions.push('单机游戏');

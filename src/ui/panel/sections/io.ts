@@ -18,6 +18,7 @@ import { toast } from '../../toast';
 import { promptModal } from '../../confirm';
 import { q } from '../ctx';
 import type { PanelSection } from '../ctx';
+import { APP_NAME } from '../../../constants';
 
 export const ioSection: PanelSection = {
   tab: 'tools',
@@ -33,7 +34,7 @@ export const ioSection: PanelSection = {
       const blob = new Blob([exportConfig()], { type: 'application/json' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = `biliHoyoFairy-rules-${new Date().toISOString().slice(0, 10)}.json`;
+      a.download = `${APP_NAME}-rules-${new Date().toISOString().slice(0, 10)}.json`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 2000);
       toast('已导出规则配置文件');
@@ -46,7 +47,7 @@ export const ioSection: PanelSection = {
         const blob = new Blob([exportSubscription(title)], { type: 'application/json' });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
-        a.download = `biliHoyoFairy-blocklist-${new Date().toISOString().slice(0, 10)}.json`;
+        a.download = `${APP_NAME}-blocklist-${new Date().toISOString().slice(0, 10)}.json`;
         a.click();
         setTimeout(() => URL.revokeObjectURL(a.href), 2000);
         toast('已导出订阅名单文件，传到公开 URL 后即可被订阅', 'success');

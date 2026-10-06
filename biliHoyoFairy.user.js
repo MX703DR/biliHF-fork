@@ -1,17 +1,17 @@
 // ==UserScript==
-// @name         B站(bilibili)推荐流净化·屏蔽拉黑去广告 — biliHoyoFairy 抗击黑潮
-// @name:zh-CN   B站(bilibili)推荐流净化·屏蔽拉黑去广告 — biliHoyoFairy 抗击黑潮
-// @name:en      biliHoyoFairy — bilibili Feed Cleaner, Blocker & Account Blacklist
-// @namespace    https://github.com/gendu-amd/biliHoyoFairy
-// @version      0.0.8
+// @name         biliHoyoFairy-MX703
+// @name:zh-CN   biliHoyoFairy-MX703
+// @name:en      biliHoyoFairy-MX703
+// @namespace    https://github.com/MX703DR/biliHF-fork
+// @version      0.0.10
 // @description  B站(bilibili/哔哩哔哩)推荐流净化与屏蔽脚本：屏蔽黑流量、引战视频、商业广告与不想看的 UP 主。支持按 标签/UP主/UID/关键词(可正则)/分区/时长/播放量/BV 精准过滤；覆盖首页/热门/排行榜/搜索/播放页/动态/评论区；白名单优先防误伤；右键一键屏蔽/拉黑(同步账号黑名单)；内置预置关键词库与规则订阅。
 // @description:en  Clean up & block the bilibili recommendation feed: hide clickbait, flame-bait, ads and unwanted UP owners. Filter by tag/UP/UID/keyword(regex)/category/duration/views/BV across home, popular, ranking, search, video, dynamic pages and comments; whitelist priority; one-click block synced to the account blacklist; preset keyword library and rule subscriptions.
 // @author       gendu-amd
 // @match        https://www.bilibili.com/*
 // @match        https://search.bilibili.com/*
 // @match        https://t.bilibili.com/*
-// @updateURL    https://raw.githubusercontent.com/gendu-amd/biliHoyoFairy/main/biliHoyoFairy.user.js
-// @downloadURL  https://raw.githubusercontent.com/gendu-amd/biliHoyoFairy/main/biliHoyoFairy.user.js
+// @updateURL    https://raw.githubusercontent.com/MX703DR/biliHF-fork/main/biliHoyoFairy.user.js
+// @downloadURL  https://raw.githubusercontent.com/MX703DR/biliHF-fork/main/biliHoyoFairy.user.js
 // @connect      api.bilibili.com
 // @connect      raw.githubusercontent.com
 // @connect      cdn.jsdelivr.net
@@ -32,6 +32,7 @@
 (() => {
   // src/constants.ts
   var VERSION = typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version || "0.0.1";
+  var APP_NAME = "biliHoyoFairy-MX703";
   var STORE_KEY = "bfb_config_v2";
   var STORE_BACKUP_KEY = "bfb_config_corrupt_backup";
   var STATS_KEY = "bfb_stats_v1";
@@ -40,6 +41,10 @@
   var SHRINK_ALERT_MIN = 5;
   var SCHEMA_VERSION = 1;
   var SUB_STORE_KEY = "bfb_subs_v1";
+  var WEBDAV_SETTINGS_KEY = "bfb_webdav_v1";
+  var METADATA_KEY = "bfb_metadata_v1";
+  var REQUEST_BUDGET_KEY = "bfb_request_budget_v1";
+  var BADGE_POSITION_KEY = "bfb_badge_position_v1";
   var BLACKLIST_MANAGE_URL = "https://account.bilibili.com/account/blacklist";
   var ATTR_API = "data-bfb-api";
   var ATTR_BLOCKED = "data-bfb-blocked";
@@ -119,6 +124,10 @@
   ];
   var UNSAFE_HIDE_CONTAINERS = ".container, .feed2, .bili-feed4, #i_cecream, #app, .bili-header";
   var SWIPE_BANNER = ".recommended-swipe";
+  var HOME_RECOMMEND_CONTAINER = ".recommended-container_floor-aside";
+  var SEARCH_VIDEO_CONTAINER = ".video-list";
+  var HOME_ROLL_BUTTON = ".roll-btn";
+  var HOME_FULL_REFRESH = ".flexible-roll-btn-inner";
   var CARD_TITLE_SELECTORS = [
     ".bili-video-card__info--tit",
     ".video-name",
@@ -225,6 +234,14 @@
     // 命中 FEED_HOOKS 的响应数
     feedParsed: 0,
     // 命中后又成功取出可过滤列表的响应数
+    initialParsed: 0,
+    // 成功识别的首屏状态数（单独记，不能掩盖后续网络管线的失败）
+    initialItems: 0,
+    initialKept: 0,
+    feedKept: 0,
+    pendingFilters: 0,
+    pendingResponses: 0,
+    // 请求尚在下载 / 过滤，不能提前断言接口结构坏了
     feedItems: 0,
     // 累计经过拦截层判定的列表项数
     feedLikes: 0,
@@ -247,8 +264,11 @@
   function healthDegraded() {
     if (!ready) return false;
     if (health.feedLike > 0 && health.feedMatched === 0) return true;
-    if (health.feedMatched > 0 && health.feedParsed === 0) return true;
-    return pageType() !== "其他" && health.cardsSeen === 0;
+    if (health.feedMatched > 0 && health.feedParsed === 0 && !health.pendingFilters && !health.pendingResponses) return true;
+    return missingCards();
+  }
+  function missingCards() {
+    return !health.pendingFilters && !health.pendingResponses && pageType() !== "其他" && health.cardsSeen === 0 && (health.feedParsed === 0 && health.initialParsed === 0 || health.feedKept > 0 || health.initialKept > 0);
   }
   var timings = /* @__PURE__ */ new Map();
   var timingOn = false;
@@ -277,22 +297,22 @@
     const w = [];
     if (health.feedLike > 0 && health.feedMatched === 0) {
       w.push(`本页发出了 ${health.feedLike} 个形似推荐流的接口请求，却没有一个命中拦截规则表：接口路径可能已变更，拦截层当前未生效。请更新脚本或提 Issue。`);
-    } else if (health.feedMatched > 0 && health.feedParsed === 0) {
-      w.push("已捕获到推荐接口响应，但取不出其中的视频列表：接口返回结构可能已变更，拦截层当前未生效。请更新脚本或提 Issue。");
+    } else if (health.feedMatched > 0 && health.feedParsed === 0 && !health.pendingFilters && !health.pendingResponses) {
+      w.push("推荐接口请求已结束，但尚未取得可解析的视频列表：请检查网络及风控状态，也可能是接口返回结构变更。");
     }
     if (health.signedSkipped > 0) {
       w.push(
         `有 ${health.signedSkipped} 个请求因携带 WBI 签名（w_rid）而放弃改写：签名覆盖全部查询参数，改动会被 B 站判为 -403 校验失败。目前唯一会改写请求的功能是「进阶 → 增大首页推荐每批加载数量」，它在这些已签名的接口上不会生效（不影响屏蔽本身），可以关掉。`
       );
     }
-    if (pageType() !== "其他" && health.cardsSeen === 0) {
+    if (missingCards()) {
       w.push("未识别到任何视频卡：卡片选择器可能已失效，DOM 兜底层当前未生效。请更新脚本或提 Issue。");
     }
     return w;
   }
   function likesDataWarning(hasLikeRule) {
     if (!hasLikeRule || health.feedItems === 0 || health.feedLikes > 0) return null;
-    return `已判定 ${health.feedItems} 条信息流数据，但**没有一条带点赞数**——B 站这些接口这次没返回该字段，所以「点赞数」与「营销号识别」在信息流上不会生效。要让它们真正生效，请打开「进阶 → 精确过滤」（会按需读取视频详情补齐点赞数）。`;
+    return `已判定 ${health.feedItems} 条信息流数据，但**没有一条带点赞数**——缺失字段默认放行。「进阶 → 精确过滤」可使用页面已有数据与本地缓存；补充实时详情须另行开启「允许补充联网取数」，默认关闭以减少风控风险。`;
   }
   function healthNotes() {
     const n = [];
@@ -334,8 +354,8 @@
     }
     return out;
   }
-  function parseSubscription(text) {
-    const t = (text || "").trim();
+  function parseSubscription(text2) {
+    const t = (text2 || "").trim();
     if (!t) throw new Error("空内容");
     if (t[0] === "{") {
       const obj = migrateSub(JSON.parse(t));
@@ -371,8 +391,14 @@
     reviewMode: false,
     // 审查模式：被拦视频不删/不隐，而是标记+就地放行，便于核对防误伤
     rightClickBlock: true,
+    invertShiftRightClick: false,
+    // 默认 Shift+右键走原生菜单；开启后反转为普通右键原生、Shift+右键插件菜单
     cardHoverBtn: false,
     // 悬停卡片时显示快捷「拉黑」浮层按钮（独立浮层，不改 B 站卡片 DOM）
+    showNotifications: true,
+    // 页面轻提示总开关；危险操作确认框不受它影响
+    showRiskNotifications: true,
+    // 风控熔断仍始终生效；这里只控制是否弹 Toast
     fuzzyMatch: true,
     // 反绕过：普通关键词匹配前剔除分隔符（“原 神/原.神”也命中）；隐形字符始终剔除
     tradNorm: false,
@@ -411,7 +437,9 @@
     // 屏蔽信息流里的直播推荐卡（首页/动态里链向 live.bilibili.com 的卡）
     hideHotSearch: false,
     apiFilters: false,
-    // 精确过滤总开关（关闭时完全不联网）
+    // 元数据规则开关，优先使用页面已有数据和本地缓存
+    allowMetadataRequests: false,
+    // 默认不逐视频补发接口；联网授权不参与规则导入/备份
     hideCharging: false,
     // 充电专属视频（API）
     boostFeedLoad: false,
@@ -440,6 +468,8 @@
       // 召唤 AI 的评论
       hideBot: false,
       // AI 机器人发布的评论
+      hideRepliesToBlockedUsers: false,
+      // 回复评论用户黑名单中用户的楼中楼评论
       allowUp: true,
       // 白名单：UP 主本人的评论免过滤
       allowPin: true,
@@ -719,7 +749,7 @@
       CONFIG.uidNames[k] = name;
     }
   }
-  var NON_PORTABLE = ["blockedCount", "uidNames", "enabled", "debug", "reviewMode", "subscriptions", "ruleStats", "ruleStatsSince", "disabled", "onboarded"];
+  var NON_PORTABLE = ["blockedCount", "uidNames", "enabled", "debug", "reviewMode", "subscriptions", "ruleStats", "ruleStatsSince", "disabled", "onboarded", "allowMetadataRequests"];
   function exportSubscription(title) {
     const b = CONFIG.block;
     const rules = {};
@@ -729,11 +759,11 @@
     }
     return JSON.stringify(
       {
-        app: "biliHoyoFairy",
+        app: APP_NAME,
         format: 1,
         meta: {
           title: title || "我的名单",
-          description: "由 biliHoyoFairy 导出。托管到公开 URL（GitHub raw / Gist raw）后，别人在「工具 → 规则订阅」填入即可。",
+          description: `由 ${APP_NAME} 导出。托管到公开 URL（GitHub raw / Gist raw）后，别人在「工具 → 规则订阅」填入即可。`,
           version: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10),
           expires: "1d"
         },
@@ -746,7 +776,7 @@
   function exportConfig() {
     const c = structuredClone(CONFIG);
     NON_PORTABLE.forEach((k) => delete c[k]);
-    return JSON.stringify({ app: "biliHoyoFairy", version: VERSION, config: c }, null, 2);
+    return JSON.stringify({ app: APP_NAME, version: VERSION, config: c }, null, 2);
   }
   var IMPORT_ARRAY_CAP = 5e4;
   function sanitizeConfigInput(input, ref = DEFAULT_CONFIG) {
@@ -796,11 +826,11 @@
   function log(...args) {
     if (!CONFIG.debug) return;
     const out = args.length === 1 && typeof args[0] === "function" ? [args[0]()] : args;
-    console.log("%c[biliHoyoFairy]%c", BADGE, "color:inherit", ...out);
+    console.log(`%c[${APP_NAME}]%c`, BADGE, "color:inherit", ...out);
   }
   function logErr(where, e) {
     try {
-      console.warn(`%c[biliHoyoFairy]%c ${where}`, BADGE, "color:#e74c3c", e);
+      console.warn(`%c[${APP_NAME}]%c ${where}`, BADGE, "color:#e74c3c", e);
     } catch (_) {
     }
   }
@@ -910,9 +940,9 @@
       }
     }
     const { detectAd } = getDetect();
-    const text = card.textContent || "";
-    info.isLive = !!(card.querySelector('a[href*="live.bilibili.com"]') || card.querySelector(LIVE_CARD_SELECTOR) || /直播中|正在直播/.test(text));
-    if (!info.uid && deepUid && text.trim()) {
+    const text2 = card.textContent || "";
+    info.isLive = !!(card.querySelector('a[href*="live.bilibili.com"]') || card.querySelector(LIVE_CARD_SELECTOR) || /直播中|正在直播/.test(text2));
+    if (!info.uid && deepUid && text2.trim()) {
       const html = card.innerHTML;
       info.uid = (html.match(/space\.bilibili\.com\/(\d+)/) || [])[1] || "";
       if (!info.uid) info.uid = (html.match(/"(?:mid|owner_?id|up_?mid)"\s*:\s*"?(\d{2,})"?/) || [])[1] || "";
@@ -949,35 +979,633 @@
       views: parseCount(stat.play),
       likes: null,
       isLive: it.type === "DYNAMIC_TYPE_LIVE_RCMD" || !!major.live_rcmd,
-      isAd: false
+      isAd: false,
+      isDynamic: true
+      // 动态作者不一定是视频 owner，不能写入按 BV 缓存的作者字段
     };
   }
   function normFeedItem(it) {
     if (!it || typeof it !== "object") return null;
     const goto = it.goto || it.card_goto || "";
-    const owner = it.owner || {};
-    const stat = it.stat || {};
-    const ad = it.ad_info || it.cm_info || it.cm || null;
-    const adC = ad && (ad.creative_content || ad.creative) || {};
-    const rawTitle = it.title || adC.title || adC.description || ad?.title || "";
+    const owner = it.owner || typeof it.author === "object" && it.author || it.upper || {};
+    const stat = it.stat || it.stats || {};
+    const ad = it.ad_info || it.cm_info || it.cm || it.biz_data?.ad_content || null;
+    const adC = ad && (ad.creative_content || ad.creative || ad.extra?.card) || {};
+    const rawTitle = it.title || adC.title || adC.dynamic_text || adC.description || ad?.title || "";
     return {
       title: String(rawTitle || "").replace(/<[^>]*>/g, ""),
       // String()：接口偶发非字符串 title 时不抛错
-      up: owner.name || it.author || it.name || ad && ad.source_content && ad.source_content.name || "",
+      up: owner.name || owner.uname || (typeof it.author === "string" ? it.author : "") || it.name || ad && ad.source_content && ad.source_content.name || "",
       uid: owner.mid != null ? String(owner.mid) : it.mid != null ? String(it.mid) : "",
       // 只认真正的分区字段。曾经兜底取过 rcmd_reason.content，但那是「已关注 / 高播放」这类**推荐理由**，
       // 不是分区；混进来会让 `分区:` 规则和 `part:` 关键词莫名其妙地匹配上推荐角标。
       // JSON 这一路本来就拿得到权威的 tname/typename，没有理由降级去用一个语义不同的字段。
       partition: it.tname || it.typename || "",
       bvid: it.bvid || "",
-      link: it.uri || it.jump_url || adC.url || adC.jump_url || "",
+      link: it.uri || it.url || it.arcurl || it.jump_url || adC.url || adC.jump_url || "",
       duration: typeof it.duration === "number" ? it.duration : it.duration ? parseDuration(it.duration) : null,
       views: stat.view != null ? stat.view : stat.play != null ? stat.play : it.play != null ? it.play : null,
       likes: stat.like != null ? stat.like : null,
       // 点赞数（feed JSON 才有；用于营销号低赞率识别）
       isLive: goto === "live",
-      isAd: goto === "ad" || goto === "cm" || !!it.ad_info || !!it.is_ad
+      isAd: goto === "ad" || goto === "cm" || !!it.ad_info || !!it.is_ad || !!it.isAd || !!it.biz_data?.is_ad_loc || /^video_ad_/.test(it.type || "")
     };
+  }
+
+  // src/stats.ts
+  var blockedLog = [];
+  var sessionBlocked = 0;
+  function setSessionBlocked(n) {
+    sessionBlocked = n;
+  }
+  var reasonDim = (reason) => {
+    const i = reason.indexOf(":");
+    return i > 0 ? reason.slice(0, i) : reason;
+  };
+  function tallyLog() {
+    const t = {};
+    for (const b of blockedLog) {
+      const d = reasonDim(b.reason);
+      t[d] = (t[d] || 0) + 1;
+    }
+    return t;
+  }
+  function bumpRuleStat(reason) {
+    if (reason.indexOf(":") <= 0) return;
+    if (!CONFIG.ruleStatsSince) CONFIG.ruleStatsSince = Date.now();
+    CONFIG.ruleStats[reason] = (CONFIG.ruleStats[reason] || 0) + 1;
+  }
+  function logBlocked(reason, info, src) {
+    blockedLog.unshift({
+      title: info && info.title || "",
+      up: info && info.up || "",
+      uid: info && info.uid || "",
+      bvid: info && info.bvid || "",
+      link: info && info.link || "",
+      src: src || "DOM",
+      reason,
+      t: Date.now()
+    });
+    if (blockedLog.length > BLOCKED_LOG_MAX) blockedLog.pop();
+  }
+  var onRecorded = () => {
+  };
+  function setStatsListener(fn) {
+    onRecorded = fn;
+  }
+  var notifyQueued = false;
+  function notifyBatched() {
+    if (notifyQueued) return;
+    notifyQueued = true;
+    Promise.resolve().then(() => {
+      notifyQueued = false;
+      try {
+        onRecorded();
+      } catch (e) {
+      }
+      scheduleStatsSave();
+    });
+  }
+  function recordBlock(reason, info, src) {
+    logBlocked(reason, info, src);
+    bumpRuleStat(reason);
+    sessionBlocked++;
+    CONFIG.blockedCount++;
+    notifyBatched();
+    log(() => `拦截🚫 ${reason} ${info && info.up ? info.up + " · " : ""}${info && info.title || "(无标题)"}`);
+  }
+
+  // src/gm.ts
+  function gmRequest(opts) {
+    if (typeof GM_xmlhttpRequest !== "function") return false;
+    GM_xmlhttpRequest(opts);
+    return true;
+  }
+
+  // src/ui/hooks.ts
+  var _refreshPanelIfOpen = () => {
+  };
+  var _openPanel = () => {
+  };
+  function setPanelHooks(h) {
+    if (h.refreshPanelIfOpen) _refreshPanelIfOpen = h.refreshPanelIfOpen;
+    if (h.openPanel) _openPanel = h.openPanel;
+  }
+  function refreshPanelIfOpen() {
+    _refreshPanelIfOpen();
+  }
+  function openPanel() {
+    _openPanel();
+  }
+
+  // src/ui/badge-drag.ts
+  var EDGE_GAP = 8;
+  var DRAG_THRESHOLD = 5;
+  function clamp(n, min, max) {
+    return Math.min(max, Math.max(min, n));
+  }
+  function clampBadgePosition(left, top, width, height, viewportWidth, viewportHeight, gap = EDGE_GAP) {
+    const maxLeft = Math.max(0, viewportWidth - width);
+    const maxTop = Math.max(0, viewportHeight - height);
+    const minLeft = Math.min(gap, maxLeft);
+    const minTop = Math.min(gap, maxTop);
+    return {
+      left: clamp(left, minLeft, Math.max(minLeft, maxLeft - gap)),
+      top: clamp(top, minTop, Math.max(minTop, maxTop - gap))
+    };
+  }
+  function loadPosition() {
+    try {
+      const raw = GM_getValue(BADGE_POSITION_KEY, null);
+      const p = typeof raw === "string" ? JSON.parse(raw) : raw;
+      if (!p || !Number.isFinite(p.left) || !Number.isFinite(p.top)) return null;
+      return { left: Number(p.left), top: Number(p.top) };
+    } catch {
+      return null;
+    }
+  }
+  function savePosition(p) {
+    try {
+      GM_setValue(BADGE_POSITION_KEY, JSON.stringify(p));
+    } catch {
+    }
+  }
+  function place(el, left, top) {
+    const rect = el.getBoundingClientRect();
+    const p = clampBadgePosition(left, top, rect.width, rect.height, window.innerWidth, window.innerHeight);
+    el.style.left = `${p.left}px`;
+    el.style.top = `${p.top}px`;
+    el.style.right = "auto";
+    el.style.bottom = "auto";
+    return p;
+  }
+  function installBadgeDrag(el, onClick) {
+    if (el.dataset.bfbDrag === "1") return;
+    el.dataset.bfbDrag = "1";
+    el.setAttribute("role", "button");
+    el.tabIndex = 0;
+    let positioned = false;
+    const stored = loadPosition();
+    if (stored) {
+      place(el, stored.left, stored.top);
+      positioned = true;
+    }
+    let pointerId = null;
+    let startX = 0;
+    let startY = 0;
+    let offsetX = 0;
+    let offsetY = 0;
+    let moved = false;
+    let suppressClick = false;
+    el.addEventListener("pointerdown", (e) => {
+      if (pointerId !== null || !e.isPrimary || e.button !== 0) return;
+      const rect = el.getBoundingClientRect();
+      pointerId = e.pointerId;
+      startX = e.clientX;
+      startY = e.clientY;
+      offsetX = e.clientX - rect.left;
+      offsetY = e.clientY - rect.top;
+      moved = false;
+      try {
+        el.setPointerCapture(e.pointerId);
+      } catch {
+      }
+    });
+    el.addEventListener("pointermove", (e) => {
+      if (e.pointerId !== pointerId) return;
+      if (!moved && Math.hypot(e.clientX - startX, e.clientY - startY) < DRAG_THRESHOLD) return;
+      moved = true;
+      positioned = true;
+      el.classList.add("dragging");
+      el.setAttribute("aria-grabbed", "true");
+      place(el, e.clientX - offsetX, e.clientY - offsetY);
+      e.preventDefault();
+    });
+    const finish = (e) => {
+      if (e.pointerId !== pointerId) return;
+      pointerId = null;
+      el.classList.remove("dragging");
+      el.removeAttribute("aria-grabbed");
+      if (!moved) return;
+      const rect = el.getBoundingClientRect();
+      const p = place(el, rect.left, rect.top);
+      savePosition(p);
+      suppressClick = true;
+      setTimeout(() => suppressClick = false, 0);
+    };
+    el.addEventListener("pointerup", finish);
+    el.addEventListener("pointercancel", finish);
+    el.addEventListener("click", (e) => {
+      if (suppressClick) {
+        suppressClick = false;
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      onClick();
+    });
+    el.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      onClick();
+    });
+    let resizeTimer = null;
+    window.addEventListener("resize", () => {
+      if (!positioned) return;
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        resizeTimer = null;
+        const rect = el.getBoundingClientRect();
+        const p = place(el, rect.left, rect.top);
+        savePosition(p);
+      }, 150);
+    });
+  }
+
+  // src/ui/toast.ts
+  function updateBadge() {
+    let b = document.getElementById("bfb-badge");
+    if (!b) {
+      b = document.createElement("div");
+      b.id = "bfb-badge";
+      document.body.appendChild(b);
+      installBadgeDrag(b, openPanel);
+    }
+    b.classList.toggle("off", !CONFIG.enabled);
+    const degraded = CONFIG.enabled && healthDegraded();
+    b.classList.toggle("warn", degraded);
+    b.title = degraded ? "⚠ 拦截可能已失效，点击查看运行自检；拖拽可移动" : "点击打开设置；拖拽可移动";
+    b.textContent = CONFIG.enabled ? `${degraded ? "⚠" : "🛡"} 已拦截 ${sessionBlocked}（共${CONFIG.blockedCount}）` : "🛡 已暂停";
+  }
+  function toastContainer() {
+    let c = document.getElementById("bfb-toasts");
+    if (!c) {
+      c = document.createElement("div");
+      c.id = "bfb-toasts";
+      document.body.appendChild(c);
+    }
+    return c;
+  }
+  var PLAIN_MS = 4e3;
+  var ACTION_MS = 6e3;
+  var dismissArmed = false;
+  function armDismissOnOutsideClick() {
+    if (dismissArmed) return;
+    dismissArmed = true;
+    const onDown = (e) => {
+      const c = document.getElementById("bfb-toasts");
+      if (!c) return;
+      if (e.target instanceof Node && c.contains(e.target)) return;
+      c.innerHTML = "";
+    };
+    document.addEventListener("mousedown", onDown, true);
+  }
+  function toast(msg, kind = "info", action, ms) {
+    if (!CONFIG.showNotifications) return;
+    const t = document.createElement("div");
+    t.className = "bfb-toast" + (kind !== "info" ? " " + kind : "");
+    t.title = "点击关闭";
+    const span = document.createElement("span");
+    span.className = "bfb-toast-msg";
+    span.textContent = msg;
+    t.appendChild(span);
+    const timeout = ms ?? (action ? ACTION_MS : PLAIN_MS);
+    const timer = setTimeout(() => t.remove(), timeout);
+    const close = () => {
+      clearTimeout(timer);
+      t.remove();
+    };
+    t.onclick = close;
+    if (action) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "bfb-toast-act";
+      b.textContent = action.label;
+      b.onclick = (e) => {
+        e.stopPropagation();
+        close();
+        action.onClick();
+      };
+      t.appendChild(b);
+    }
+    toastContainer().appendChild(t);
+    armDismissOnOutsideClick();
+  }
+
+  // src/metadata-cache.ts
+  var MAX = 1800;
+  var TTL = 7 * 864e5;
+  var entries = /* @__PURE__ */ new Map();
+  var loaded = false;
+  var saveTimer;
+  var text = (x) => typeof x === "string" ? x.slice(0, 2e3) : "";
+  var number = (x) => typeof x === "number" && Number.isFinite(x) && x >= 0 ? x : void 0;
+  function thin(key, data) {
+    if (!data || typeof data !== "object") return null;
+    if (key.startsWith("t:")) return Array.isArray(data) ? data.filter((x) => typeof x === "string").slice(0, 100).map(text) : null;
+    if (key.startsWith("c:")) {
+      const c = data.card || data;
+      return { card: { mid: String(c.mid || ""), name: text(c.name), sign: text(c.sign) } };
+    }
+    if (!key.startsWith("v:")) return null;
+    return {
+      owner: { mid: String(data.owner?.mid || ""), name: text(data.owner?.name) },
+      tname: text(data.tname),
+      duration: number(data.duration),
+      stat: { view: number(data.stat?.view), like: number(data.stat?.like) },
+      is_upower_exclusive: typeof data.is_upower_exclusive === "boolean" || data.is_upower_exclusive === 0 || data.is_upower_exclusive === 1 ? !!data.is_upower_exclusive : void 0
+    };
+  }
+  function readStored() {
+    const out = /* @__PURE__ */ new Map();
+    try {
+      const raw = GM_getValue(METADATA_KEY, "");
+      if (typeof raw !== "string" || raw.length > 25e5) return out;
+      const list = JSON.parse(raw);
+      if (!Array.isArray(list)) return out;
+      for (const row of list.slice(0, MAX)) {
+        if (!Array.isArray(row) || typeof row[0] !== "string" || row[0].length > 100) continue;
+        const [key, entry] = row;
+        if (!entry || !Number.isFinite(entry.at) || entry.at > Date.now() || Date.now() - entry.at > TTL) continue;
+        const data = thin(key, entry.data);
+        if (data) out.set(key, { at: entry.at, data });
+      }
+    } catch {
+    }
+    return out;
+  }
+  function load() {
+    if (loaded) return;
+    loaded = true;
+    for (const [key, value] of readStored()) entries.set(key, value);
+  }
+  function cachedMetadata(bvid, uid = "") {
+    load();
+    const get = (key) => {
+      const e = entries.get(key);
+      if (!e || Date.now() - e.at > (key.startsWith("c:") ? 864e5 : TTL)) return null;
+      return e.data;
+    };
+    const view = bvid ? get("v:" + bvid) : null;
+    return { view, tags: bvid ? get("t:" + bvid) : null, card: uid || view?.owner?.mid ? get("c:" + (uid || view.owner.mid)) : null };
+  }
+  function put(key, value) {
+    load();
+    let data = thin(key, value);
+    if (!data) return;
+    const old = entries.get(key);
+    if (key.startsWith("v:") && old && Date.now() - old.at < TTL) {
+      data = {
+        ...old.data,
+        ...Object.fromEntries(Object.entries(data).filter(([, x]) => x !== void 0 && x !== "")),
+        owner: { mid: data.owner.mid || old.data.owner.mid, name: data.owner.name || old.data.owner.name },
+        stat: { ...old.data.stat, ...Object.fromEntries(Object.entries(data.stat).filter(([, x]) => x !== void 0)) }
+      };
+      if (!data.tname) data.tname = old.data.tname;
+    }
+    if (old && JSON.stringify(old.data) === JSON.stringify(data) && Date.now() - old.at < 36e5) return;
+    entries.delete(key);
+    entries.set(key, { at: Date.now(), data });
+    while (entries.size > MAX) entries.delete(entries.keys().next().value);
+    if (saveTimer) return;
+    saveTimer = setTimeout(() => {
+      saveTimer = void 0;
+      const merged = readStored();
+      for (const [k, e] of entries) if (!merged.has(k) || merged.get(k).at <= e.at) merged.set(k, e);
+      const rows = [...merged].filter(([, e]) => Date.now() - e.at <= TTL).sort((a, b) => b[1].at - a[1].at).slice(0, MAX);
+      try {
+        GM_setValue(METADATA_KEY, JSON.stringify(rows));
+      } catch {
+      }
+    }, 2e3);
+  }
+  function rememberFeedMetadata(info) {
+    if (!info.bvid || info.isDynamic) return;
+    put("v:" + info.bvid, {
+      owner: { mid: info.uid, name: info.up },
+      tname: info.partition,
+      duration: info.duration,
+      stat: { view: info.views, like: info.likes }
+    });
+  }
+  function rememberMetadata(kind, id, data) {
+    if (id && id.length <= 80) put(kind + ":" + id, data);
+  }
+  var isMetadataUrl = (url) => /\/x\/web-interface\/(?:wbi\/)?(?:view(?:\/detail(?:\/tag)?)?|card)(?:\?|$)/.test(url);
+  function observeMetadata(url, json) {
+    if (json?.code !== 0 || !json.data) return;
+    try {
+      const u = new URL(url, "https://api.bilibili.com");
+      if (u.hostname !== "api.bilibili.com" || !isMetadataUrl(u.href)) return;
+      const d = json.data;
+      if (/\/card$/.test(u.pathname)) rememberMetadata("c", String(d.card?.mid || u.searchParams.get("mid") || ""), d);
+      else if (/\/tag$/.test(u.pathname)) rememberMetadata("t", u.searchParams.get("bvid") || "", Array.isArray(d) ? d.map((x) => x.tag_name) : null);
+      else {
+        const v = d.View || d;
+        const bvid = v.bvid || u.searchParams.get("bvid") || "";
+        rememberMetadata("v", bvid, v);
+        if (Array.isArray(d.Tags)) rememberMetadata("t", bvid, d.Tags.map((x) => x.tag_name));
+        if (d.Card) rememberMetadata("c", String(d.Card.card?.mid || v.owner?.mid || ""), d.Card);
+      }
+    } catch {
+    }
+  }
+  function observeInitialMetadata(state) {
+    const v = state?.videoData;
+    if (!v?.bvid) return;
+    rememberMetadata("v", v.bvid, v);
+    if (Array.isArray(state.tags)) rememberMetadata("t", v.bvid, state.tags.map((x) => x.tag_name));
+    if (state.upData) rememberMetadata("c", String(state.upData.mid || v.owner?.mid || ""), state.upData);
+  }
+
+  // src/request-budget.ts
+  function takeMetadataRequest() {
+    const now = Date.now();
+    let times = [];
+    try {
+      const raw = GM_getValue(REQUEST_BUDGET_KEY, "[]");
+      if (typeof raw === "string" && raw.length < 5e3) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) times = parsed.filter((x) => Number.isFinite(x) && x <= now && now - x < 864e5).slice(-60);
+      }
+    } catch {
+    }
+    if (times.length >= 60 || times.filter((x) => now - x < 6e4).length >= 6) return false;
+    try {
+      GM_setValue(REQUEST_BUDGET_KEY, JSON.stringify([...times, now]));
+    } catch {
+      return false;
+    }
+    return true;
+  }
+
+  // src/api.ts
+  var VIEW_CACHE_MAX = 800;
+  var TAG_CACHE_MAX = 1200;
+  var CARD_CACHE_MAX = 800;
+  var riskGuard = {
+    until: 0,
+    strikes: 0,
+    blocked() {
+      return Date.now() < this.until;
+    },
+    remaining() {
+      return Math.max(0, this.until - Date.now());
+    },
+    // 任何联网响应都喂进来：风控码→升级退避；正常码→冷却期过后清零。
+    note(code) {
+      if (code == null || !RISK_CODES.has(code)) {
+        if (code === 0 && this.strikes && !this.blocked()) this.strikes = 0;
+        return;
+      }
+      const wasBlocked = this.blocked();
+      this.strikes = Math.min(this.strikes + 1, 6);
+      const backoff = Math.min(6e4, 2e3 * 2 ** (this.strikes - 1));
+      this.until = Date.now() + backoff;
+      if (!wasBlocked) {
+        logErr("风控熔断", `code ${code}，暂停联网 ${Math.round(backoff / 1e3)}s`);
+        if (CONFIG.showRiskNotifications) {
+          toast(`⚠️ 触发 B 站风控(code ${code})，已暂停联网 ${Math.round(backoff / 1e3)} 秒以保护账号`, "error");
+        }
+      }
+    }
+  };
+  var API = {
+    view: /* @__PURE__ */ new Map(),
+    tag: /* @__PURE__ */ new Map(),
+    card: /* @__PURE__ */ new Map(),
+    queue: [],
+    active: 0,
+    waiting: false,
+    CONCURRENCY: 1,
+    DELAY: 1e3
+  };
+  function apiPump() {
+    if (riskGuard.blocked()) {
+      if (!API.waiting) {
+        API.waiting = true;
+        setTimeout(() => {
+          API.waiting = false;
+          apiPump();
+        }, riskGuard.remaining() + 50);
+      }
+      return;
+    }
+    while (API.active < API.CONCURRENCY && API.queue.length) {
+      const task = API.queue.shift();
+      API.active++;
+      task(() => {
+        setTimeout(() => {
+          API.active--;
+          apiPump();
+        }, API.DELAY);
+      });
+    }
+  }
+  function apiEnqueue(task) {
+    API.queue.push(task);
+    apiPump();
+  }
+  function gmGet(url, cb) {
+    const sent = gmRequest({
+      method: "GET",
+      url,
+      withCredentials: true,
+      timeout: 12e3,
+      onload: (r) => {
+        try {
+          const j = JSON.parse(r.responseText);
+          riskGuard.note(j && j.code);
+          cb(j);
+        } catch (e) {
+          cb(null);
+        }
+      },
+      onerror: () => cb(null),
+      ontimeout: () => cb(null)
+    });
+    if (!sent) cb(null);
+  }
+  var RETRY_AFTER_MS = 3e4;
+  var COOLDOWN_MAX = 2e3;
+  var cooldown = /* @__PURE__ */ new Map();
+  function inCooldown(k) {
+    const until = cooldown.get(k);
+    if (until === void 0) return false;
+    if (Date.now() < until) return true;
+    cooldown.delete(k);
+    return false;
+  }
+  var inflight = /* @__PURE__ */ new Map();
+  function cachedGet(cache, cap, ns, key, url, pick, cb, deadline, manual = false) {
+    if (!key) return cb(null);
+    if (cache.has(key)) return cb(cache.get(key));
+    const local = cachedMetadata(ns === "c:" ? "" : key, ns === "c:" ? key : "");
+    const known = ns === "v:" ? local.view : ns === "t:" ? local.tags : local.card;
+    if (!manual && known && (ns !== "v:" || !CONFIG.apiFilters || !CONFIG.allowMetadataRequests)) return cb(known);
+    if (!manual && (!CONFIG.apiFilters || !CONFIG.allowMetadataRequests)) return cb(null);
+    if (deadline !== void 0 && (Date.now() >= deadline || riskGuard.blocked())) return cb(null);
+    if (inCooldown(ns + key)) return cb(null);
+    const flightKey = ns + key;
+    const waiting = inflight.get(flightKey);
+    if (waiting) {
+      waiting.push(cb);
+      return;
+    }
+    inflight.set(flightKey, [cb]);
+    const settle = (d) => {
+      const cbs = inflight.get(flightKey) || [];
+      inflight.delete(flightKey);
+      for (const f of cbs) f(d);
+    };
+    apiEnqueue((done) => {
+      if (deadline !== void 0 && Date.now() >= deadline || !manual && (!CONFIG.apiFilters || !CONFIG.allowMetadataRequests || !takeMetadataRequest())) {
+        settle(null);
+        done();
+        return;
+      }
+      gmGet(url, (j) => {
+        const code = j && typeof j.code === "number" ? j.code : null;
+        if (code === null || RISK_CODES.has(code)) {
+          capMapSet(cooldown, ns + key, Date.now() + RETRY_AFTER_MS, COOLDOWN_MAX);
+          settle(null);
+        } else {
+          const d = code === 0 ? pick(j) : null;
+          capMapSet(cache, key, d, cap);
+          if (d) rememberMetadata(ns[0], key, d);
+          settle(d);
+        }
+        done();
+      });
+    });
+  }
+  function fetchView(bvid, cb, deadline, manual = false) {
+    cachedGet(API.view, VIEW_CACHE_MAX, "v:", bvid, "https://api.bilibili.com/x/web-interface/view?bvid=" + encodeURIComponent(bvid), (j) => j.data, (d) => {
+      if (d && d.owner && d.owner.mid && d.owner.name && CONFIG.uidNames[String(d.owner.mid)] === void 0) {
+        setUidName(d.owner.mid, d.owner.name);
+        scheduleStatsSave();
+      }
+      cb(d);
+    }, deadline, manual);
+  }
+  function fetchTags(bvid, cb, deadline) {
+    cachedGet(
+      API.tag,
+      TAG_CACHE_MAX,
+      "t:",
+      bvid,
+      "https://api.bilibili.com/x/web-interface/view/detail/tag?bvid=" + encodeURIComponent(bvid),
+      (j) => Array.isArray(j.data) ? j.data.map((x) => x.tag_name).filter(Boolean) : null,
+      cb,
+      deadline
+    );
+  }
+  function fetchCard(mid, cb, deadline) {
+    cachedGet(API.card, CARD_CACHE_MAX, "c:", mid, "https://api.bilibili.com/x/web-interface/card?mid=" + encodeURIComponent(mid), (j) => j.data, cb, deadline);
+  }
+  function cachedUid(bvid) {
+    const d = bvid && (API.view.get(bvid) || cachedMetadata(bvid).view);
+    return d && d.owner && d.owner.mid ? String(d.owner.mid) : "";
   }
 
   // src/match/t2s.ts
@@ -1081,26 +1709,26 @@
     }
     return { plain, regexes, empty: !plain && !regexes.length, plainSrc, plainNorm, regexSrc };
   }
-  function textHit(text, matcher) {
-    if (!text || !matcher) return false;
-    if (matcher.plain && matcher.plain.test(normMatch(text))) return true;
+  function textHit(text2, matcher) {
+    if (!text2 || !matcher) return false;
+    if (matcher.plain && matcher.plain.test(normMatch(text2))) return true;
     if (matcher.regexes.length) {
-      let t = stripInvisible(text);
+      let t = stripInvisible(text2);
       if (getTrad()) t = toSimplified(t);
       for (const r of matcher.regexes) if (r.test(t)) return true;
     }
     return false;
   }
-  function whichHit(text, matcher) {
-    if (!text || !matcher) return null;
+  function whichHit(text2, matcher) {
+    if (!text2 || !matcher) return null;
     if (matcher.plain) {
-      const t = normMatch(text);
+      const t = normMatch(text2);
       for (let i = 0; i < matcher.plainNorm.length; i++) {
         if (t.includes(matcher.plainNorm[i])) return matcher.plainSrc[i];
       }
     }
     if (matcher.regexes.length) {
-      const t = stripInvisible(text);
+      const t = stripInvisible(text2);
       for (let i = 0; i < matcher.regexes.length; i++) {
         if (matcher.regexes[i].test(t)) return matcher.regexSrc[i];
       }
@@ -1123,13 +1751,13 @@
       part: compileLines(buckets.part)
     };
   }
-  function kwHit(scoped, field, text) {
-    if (!scoped || !text) return false;
-    return textHit(text, scoped.all) || textHit(text, scoped[field]);
+  function kwHit(scoped, field, text2) {
+    if (!scoped || !text2) return false;
+    return textHit(text2, scoped.all) || textHit(text2, scoped[field]);
   }
-  function kwWhich(scoped, field, text) {
-    if (!scoped || !text) return null;
-    return whichHit(text, scoped.all) || whichHit(text, scoped[field]);
+  function kwWhich(scoped, field, text2) {
+    if (!scoped || !text2) return null;
+    return whichHit(text2, scoped.all) || whichHit(text2, scoped[field]);
   }
   function splitRuleInput(raw) {
     const out = [];
@@ -1297,8 +1925,8 @@
       match: (i) => {
         const field = kwHit(M.blockKw, "title", i.title) ? "title" : i.up && kwHit(M.blockKw, "up", i.up) ? "up" : kwHit(M.blockKw, "part", i.partition) ? "part" : null;
         if (!field) return null;
-        const text = field === "title" ? i.title : field === "up" ? i.up : i.partition;
-        const rule = kwWhich(M.blockKw, field, text);
+        const text2 = field === "title" ? i.title : field === "up" ? i.up : i.partition;
+        const rule = kwWhich(M.blockKw, field, text2);
         return rule ? "关键词:" + rule : "关键词";
       }
     },
@@ -1479,11 +2107,6 @@
     if (needCard) needView = true;
     return { needTag, needView, needCard };
   }
-  function apiRulesActive() {
-    if (!CONFIG.apiFilters) return false;
-    const n = apiNeeds();
-    return n.needTag || n.needView || n.needCard;
-  }
   function buildApiCtx(info, view, tags, cardData) {
     const ctx = { tags: tags || [], view: view || {} };
     if (cardData) {
@@ -1505,288 +2128,132 @@
     return null;
   }
 
-  // src/stats.ts
-  var blockedLog = [];
-  var sessionBlocked = 0;
-  function setSessionBlocked(n) {
-    sessionBlocked = n;
+  // src/video-filter.ts
+  var FILTER_WAIT_MS = 8e3;
+  var verdicts = /* @__PURE__ */ new Map();
+  var latestVerdicts = /* @__PURE__ */ new Map();
+  var pending = /* @__PURE__ */ new Map();
+  var verdictKey = (bvid, title, uid) => JSON.stringify([bvid, title, uid]);
+  function dataVerdict(bvid, title, uid) {
+    const exact = bvid && title !== void 0 && uid !== void 0 ? verdicts.get(verdictKey(bvid, title, uid)) : null;
+    const v = exact || bvid && latestVerdicts.get(bvid);
+    return v && v.version === ruleVersion && (title === void 0 || v.info.title === title) && (!uid || v.info.uid === uid) ? v : null;
   }
-  var reasonDim = (reason) => {
-    const i = reason.indexOf(":");
-    return i > 0 ? reason.slice(0, i) : reason;
-  };
-  function tallyLog() {
-    const t = {};
-    for (const b of blockedLog) {
-      const d = reasonDim(b.reason);
-      t[d] = (t[d] || 0) + 1;
+  function remember(v) {
+    if (v.version !== ruleVersion) return v;
+    if (v.info.bvid) {
+      capMapSet(verdicts, verdictKey(v.info.bvid, v.info.title, v.info.uid), v, 2e3);
+      capMapSet(latestVerdicts, v.info.bvid, v, 2e3);
     }
-    return t;
+    return v;
   }
-  function bumpRuleStat(reason) {
-    if (reason.indexOf(":") <= 0) return;
-    if (!CONFIG.ruleStatsSince) CONFIG.ruleStatsSince = Date.now();
-    CONFIG.ruleStats[reason] = (CONFIG.ruleStats[reason] || 0) + 1;
+  function videoNeeds(info) {
+    if (!CONFIG.apiFilters || !info.bvid || isWhitelisted(info)) return { needView: false, needTag: false, needCard: false };
+    const n = apiNeeds();
+    const b = CONFIG.block;
+    const missingPart = !info.partition && (!M.blockPartition.empty || !M.blockKw.part.empty || !M.allowKw.part.empty);
+    const missingUid = !info.uid && M.needUid;
+    const missingDuration = info.duration == null && (b.minDuration > 0 || b.maxDuration > 0);
+    const missingViews = info.views == null && (b.minViews > 0 || b.maxViews > 0 || b.spamLikeRatio > 0);
+    const missingLikes = info.likes == null && (b.minLikes > 0 || b.maxLikes > 0 || b.spamLikeRatio > 0);
+    n.needView = CONFIG.hideCharging || missingPart || missingUid || missingDuration || missingViews || missingLikes || n.needCard && !info.uid;
+    return n;
   }
-  function logBlocked(reason, info, src) {
-    blockedLog.unshift({
-      title: info && info.title || "",
-      up: info && info.up || "",
-      uid: info && info.uid || "",
-      bvid: info && info.bvid || "",
-      link: info && info.link || "",
-      src: src || "DOM",
-      reason,
-      t: Date.now()
-    });
-    if (blockedLog.length > BLOCKED_LOG_MAX) blockedLog.pop();
+  function needsVideoMetadata(info) {
+    const n = videoNeeds(info);
+    return n.needView || n.needTag || n.needCard;
   }
-  var onRecorded = () => {
-  };
-  function setStatsListener(fn) {
-    onRecorded = fn;
-  }
-  var notifyQueued = false;
-  function notifyBatched() {
-    if (notifyQueued) return;
-    notifyQueued = true;
-    Promise.resolve().then(() => {
-      notifyQueued = false;
-      try {
-        onRecorded();
-      } catch (e) {
-      }
-      scheduleStatsSave();
-    });
-  }
-  function recordBlock(reason, info, src) {
-    logBlocked(reason, info, src);
-    bumpRuleStat(reason);
-    sessionBlocked++;
-    CONFIG.blockedCount++;
-    notifyBatched();
-    log(() => `拦截🚫 ${reason} ${info && info.up ? info.up + " · " : ""}${info && info.title || "(无标题)"}`);
-  }
-
-  // src/net.ts
-  var FEED_HOOKS = [
-    { re: /\/x\/web-interface\/wbi\/index\/top\/feed\/rcmd/, get: (d) => d && Array.isArray(d.item) ? d.item : null },
-    { re: /\/x\/web-interface\/index\/top\/feed\/rcmd/, get: (d) => d && Array.isArray(d.item) ? d.item : null },
-    { re: /\/x\/web-interface\/ranking\/v2/, get: (d) => d && Array.isArray(d.list) ? d.list : null },
-    { re: /\/x\/web-interface\/popular(\/|\?|$)/, get: (d) => d && Array.isArray(d.list) ? d.list : null },
-    { re: /\/x\/web-interface\/archive\/related/, get: (d) => Array.isArray(d) ? d : null },
-    // 搜索页：type=视频 时 data.result 直接是视频数组；综合(all/v2) 时 data.result 是分组，取 result_type==='video' 的 data
-    {
-      re: /\/x\/web-interface\/wbi\/search\/(type|all\/v2)/,
-      get: (d) => {
-        if (!d || !Array.isArray(d.result)) return null;
-        if (d.result.length && d.result[0] && d.result[0].result_type) {
-          const g = d.result.find((x) => x.result_type === "video");
-          return g && Array.isArray(g.data) ? g.data : null;
-        }
-        return d.result;
-      }
-    },
-    // 动态流（t.bilibili.com）。此前这是唯一一个完全靠 DOM 兜底的主要页面——DOM 层只能在卡片
-    // 画出来之后再隐藏，且抠不到 UID 这类权威字段。接到拦截层后与首页同源同判。
-    // 只删 data.items 里的项，不动 offset/has_more：分页游标由 B 站维护，改它会打乱后续加载。
-    { re: /\/x\/polymer\/web-dynamic\/v1\/feed\/(all|space)/, get: (d) => d && Array.isArray(d.items) ? d.items : null, norm: normDynamicItem }
-  ];
-  var memoUrl = null;
-  var memoHook = null;
-  function findFeedHook(url) {
-    if (!url) return null;
-    if (url === memoUrl) return memoHook;
-    let hit = null;
-    for (const h of FEED_HOOKS) {
-      if (h.re.test(url)) {
-        hit = h;
-        break;
-      }
-    }
-    memoUrl = url;
-    memoHook = hit;
-    return hit;
-  }
-  var isFeedUrl = (url) => !!findFeedHook(url);
-  function filterFeedJson(url, json) {
-    if (!json || json.code !== 0 || !json.data) return 0;
-    const hook = findFeedHook(url);
-    if (!hook) return 0;
-    const arr = hook.get(json.data);
-    if (!arr || !arr.length) return 0;
-    health.feedParsed++;
-    health.feedItems += arr.length;
-    if (!CONFIG.enabled || CONFIG.reviewMode) return 0;
-    let removed = 0;
-    for (let i = arr.length - 1; i >= 0; i--) {
-      try {
-        const info = (hook.norm || normFeedItem)(arr[i]);
-        if (!info) continue;
-        if (info.likes != null) health.feedLikes++;
-        const reason = matchRule(info);
-        if (reason) {
-          recordBlock(reason, info, "NET");
-          arr.splice(i, 1);
-          removed++;
-        }
-      } catch (e) {
-        log("拦截层 单项判定异常（已跳过）", e);
-      }
-    }
-    if (removed) log(`拦截层 删除 ${removed} 项 @ ${url.split("?")[0]}`);
-    return removed;
-  }
-  var SIGNED_RE = /[?&]w_rid=/;
-  var NET = /* @__PURE__ */ (() => {
-    const preFns = [];
-    const postFns = [];
+  function enrich(info, view) {
+    if (!view) return info;
     return {
-      addPre: (fn) => preFns.push(fn),
-      addPost: (fn) => postFns.push(fn),
-      hasPre: () => preFns.length > 0,
-      rewriteUrl(url) {
-        let u = url;
-        for (const fn of preFns) {
-          try {
-            const r = fn(u);
-            if (typeof r === "string" && r) u = r;
-          } catch (e) {
-            logErr("NET.pre", e);
-          }
-        }
-        if (u !== url && SIGNED_RE.test(url)) {
-          health.signedSkipped++;
-          return url;
-        }
-        return u;
-      },
-      runJson(url, json) {
-        let removed = 0;
-        for (const fn of postFns) {
-          try {
-            removed += fn(url, json) || 0;
-          } catch (e) {
-            logErr("NET.post", e);
-          }
-        }
-        return removed;
-      }
+      ...info,
+      uid: info.uid || (!info.isDynamic && view.owner?.mid != null ? String(view.owner.mid) : ""),
+      up: info.up || !info.isDynamic && view.owner?.name || "",
+      partition: info.partition || view.tname || "",
+      duration: info.duration ?? (typeof view.duration === "number" ? view.duration : null),
+      views: info.views ?? (typeof view.stat?.view === "number" ? view.stat.view : null),
+      likes: info.likes ?? (typeof view.stat?.like === "number" ? view.stat.like : null)
     };
-  })();
-  function rewriteRequestUrl(url) {
-    return NET.hasPre() ? NET.rewriteUrl(url) : url;
   }
-  var RCMD_RE = /\/x\/web-interface\/(wbi\/)?index\/top\/feed\/rcmd/;
-  NET.addPost(filterFeedJson);
-  NET.addPre((url) => {
-    if (!CONFIG.boostFeedLoad) return;
-    if (RCMD_RE.test(url) && /[?&]ps=\d+/.test(url)) {
-      return url.replace(/([?&]ps=)\d+/, "$130");
-    }
-  });
-  function computeFilteredText(url, raw) {
-    try {
-      const json = JSON.parse(raw);
-      return NET.runJson(url, json) ? JSON.stringify(json) : raw;
-    } catch (e) {
-      return raw;
-    }
+  function decide(info, meta) {
+    const complete = enrich(info, meta?.view);
+    return {
+      info: complete,
+      version: ruleVersion,
+      reason: !CONFIG.enabled ? null : matchRule(complete) || (CONFIG.apiFilters && meta ? matchApi(complete, meta.view, meta.tags, meta.card) : null)
+    };
   }
-  function installNetworkHooks() {
-    const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const RespCtor = W.Response || Response;
-    if (typeof W.fetch === "function" && !W.fetch.__bfb) {
-      const origFetch = W.fetch;
-      const wrapped = function(input, init) {
-        let input2 = input;
-        if (typeof input === "string") input2 = rewriteRequestUrl(input);
-        const url = typeof input2 === "string" ? input2 : input2 && input2.url || "";
-        const p = origFetch.call(this, input2, init);
-        health.noteRequest(url);
-        if (!isFeedUrl(url)) return p;
-        health.feedMatched++;
-        return p.then(
-          (resp) => resp.clone().json().then((json) => {
-            if (!NET.runJson(url, json)) return resp;
-            const h = new Headers(resp.headers);
-            h.delete("content-encoding");
-            h.delete("content-length");
-            return new RespCtor(JSON.stringify(json), { status: resp.status, statusText: resp.statusText, headers: h });
-          }).catch(() => resp)
-        );
-      };
-      wrapped.__bfb = true;
-      try {
-        W.fetch = wrapped;
-      } catch (e) {
-        logErr("installNetworkHooks.fetch", e);
+  function missingMetadata(info, meta) {
+    const complete = enrich(info, meta.view);
+    const n = videoNeeds(complete);
+    const b = CONFIG.block;
+    n.needView = n.needView && (!complete.partition && (!M.blockPartition.empty || !M.blockKw.part.empty || !M.allowKw.part.empty) || !complete.uid && (M.needUid || n.needCard) || complete.duration == null && (b.minDuration > 0 || b.maxDuration > 0) || complete.views == null && (b.minViews > 0 || b.maxViews > 0 || b.spamLikeRatio > 0) || complete.likes == null && (b.minLikes > 0 || b.maxLikes > 0 || b.spamLikeRatio > 0) || CONFIG.hideCharging && meta.view?.is_upower_exclusive === void 0);
+    n.needTag = n.needTag && meta.tags === null;
+    n.needCard = n.needCard && !meta.card;
+    return n;
+  }
+  function immediateVerdict(info) {
+    rememberFeedMetadata(info);
+    const meta = cachedMetadata(info.bvid, info.uid);
+    const complete = CONFIG.apiFilters ? enrich(info, meta.view) : info;
+    if (!CONFIG.enabled || isWhitelisted(complete)) return decide(complete);
+    const uncertainAllow = CONFIG.apiFilters && info.bvid && (!complete.uid && M.allowUidSet.size > 0 || !complete.partition && !M.allowKw.part.empty);
+    const v = decide(complete, CONFIG.apiFilters ? meta : void 0);
+    if (!CONFIG.allowMetadataRequests) return { ...v, reason: uncertainAllow ? null : v.reason, deferred: !!uncertainAllow || needsVideoMetadata(complete) };
+    if (uncertainAllow) return null;
+    const n = missingMetadata(complete, meta);
+    if (v.reason || !n.needView && !n.needTag && !n.needCard) return v;
+    return null;
+  }
+  function evaluateVideo(info, deadline = Date.now() + FILTER_WAIT_MS, freshResponse = false) {
+    const cached2 = dataVerdict(info.bvid, info.title, info.uid);
+    if (cached2 && (!freshResponse || !cached2.deferred)) return Promise.resolve(cached2);
+    const immediate = immediateVerdict(info);
+    if (immediate) return Promise.resolve(remember(immediate));
+    if (riskGuard.blocked() || deadline <= Date.now()) return Promise.resolve(remember({ ...decide(info), deferred: true }));
+    const key = verdictKey(info.bvid, info.title, info.uid) + ":" + ruleVersion;
+    const existing = pending.get(key);
+    if (existing) return existing;
+    const version = ruleVersion;
+    const meta = cachedMetadata(info.bvid, info.uid);
+    const n = missingMetadata(info, meta);
+    const work = async () => {
+      const jobs = [];
+      if (n.needView) jobs.push(new Promise((resolve) => fetchView(info.bvid, (v) => {
+        meta.view = v || meta.view;
+        resolve();
+      }, deadline)));
+      if (n.needTag && meta.tags === null) jobs.push(new Promise((resolve) => fetchTags(info.bvid, (t) => {
+        meta.tags = t;
+        resolve();
+      }, deadline)));
+      if (n.needCard && !meta.card && info.uid) jobs.push(new Promise((resolve) => fetchCard(info.uid, (c) => {
+        meta.card = c;
+        resolve();
+      }, deadline)));
+      await Promise.all(jobs);
+      if (n.needCard && !info.uid && meta.view?.owner?.mid && Date.now() < deadline) {
+        await new Promise((resolve) => fetchCard(String(meta.view.owner.mid), (c) => {
+          meta.card = c;
+          resolve();
+        }, deadline));
       }
-    }
-    const XHR = W.XMLHttpRequest;
-    if (XHR && XHR.prototype && !XHR.prototype.__bfb) {
-      const origOpen = XHR.prototype.open;
-      const dText = Object.getOwnPropertyDescriptor(XHR.prototype, "responseText");
-      const dResp = Object.getOwnPropertyDescriptor(XHR.prototype, "response");
-      XHR.prototype.open = function(method, url, async = true, user, password) {
-        const self = this;
-        if (self.__bfbHooked) {
-          delete self.responseText;
-          delete self.response;
-          self.__bfbHooked = false;
-        }
-        self.__bfbText = void 0;
-        self.__bfbResp = void 0;
-        const url2 = typeof url === "string" ? rewriteRequestUrl(url) : url;
-        health.noteRequest(url2);
-        if (isFeedUrl(url2)) {
-          health.feedMatched++;
-          const filteredText = (getRaw) => {
-            if (self.__bfbText === void 0) self.__bfbText = computeFilteredText(url2, getRaw());
-            return self.__bfbText;
-          };
-          if (dText && dText.get) {
-            Object.defineProperty(self, "responseText", {
-              configurable: true,
-              get() {
-                if (self.readyState !== 4) return dText.get.call(self);
-                return filteredText(() => dText.get.call(self));
-              }
-            });
-            self.__bfbHooked = true;
-          }
-          if (dResp && dResp.get) {
-            Object.defineProperty(self, "response", {
-              configurable: true,
-              get() {
-                if (self.readyState !== 4) return dResp.get.call(self);
-                const rt = self.responseType;
-                if (rt === "json") {
-                  if (self.__bfbResp === void 0) {
-                    const orig = dResp.get.call(self);
-                    try {
-                      if (orig && typeof orig === "object") NET.runJson(url2, orig);
-                      self.__bfbResp = orig;
-                    } catch (e) {
-                      self.__bfbResp = orig;
-                    }
-                  }
-                  return self.__bfbResp;
-                }
-                if (rt === "" || rt === "text") {
-                  const orig = dResp.get.call(self);
-                  return typeof orig === "string" ? filteredText(() => orig) : orig;
-                }
-                return dResp.get.call(self);
-              }
-            });
-            self.__bfbHooked = true;
-          }
-        }
-        return origOpen.call(this, method, url2, async, user, password);
+      const missing = missingMetadata(info, meta);
+      return { ...decide(info, meta), deferred: missing.needTag || missing.needView || missing.needCard };
+    };
+    const promise = new Promise((resolve) => {
+      let settled = false;
+      const finish = (v) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(remember({ ...v, version }));
       };
-      XHR.prototype.__bfb = true;
-    }
+      const timer = setTimeout(() => finish({ ...decide(info), deferred: true }), Math.max(0, deadline - Date.now()));
+      work().then(finish, () => finish({ ...decide(info), deferred: true }));
+    }).finally(() => pending.delete(key));
+    pending.set(key, promise);
+    return promise;
   }
 
   // src/shadow.ts
@@ -1821,208 +2288,6 @@
     }
   }
 
-  // src/ui/hooks.ts
-  var _refreshPanelIfOpen = () => {
-  };
-  var _openPanel = () => {
-  };
-  function setPanelHooks(h) {
-    if (h.refreshPanelIfOpen) _refreshPanelIfOpen = h.refreshPanelIfOpen;
-    if (h.openPanel) _openPanel = h.openPanel;
-  }
-  function refreshPanelIfOpen() {
-    _refreshPanelIfOpen();
-  }
-  function openPanel() {
-    _openPanel();
-  }
-
-  // src/ui/toast.ts
-  function updateBadge() {
-    let b = document.getElementById("bfb-badge");
-    if (!b) {
-      b = document.createElement("div");
-      b.id = "bfb-badge";
-      b.title = "点击打开设置";
-      b.onclick = openPanel;
-      document.body.appendChild(b);
-    }
-    b.classList.toggle("off", !CONFIG.enabled);
-    const degraded = CONFIG.enabled && healthDegraded();
-    b.classList.toggle("warn", degraded);
-    b.title = degraded ? "⚠ 拦截可能已失效，点开看「工具 → 🩺 运行自检」" : "点击打开设置";
-    b.textContent = CONFIG.enabled ? `${degraded ? "⚠" : "🛡"} 已拦截 ${sessionBlocked}（共${CONFIG.blockedCount}）` : "🛡 已暂停";
-  }
-  function toastContainer() {
-    let c = document.getElementById("bfb-toasts");
-    if (!c) {
-      c = document.createElement("div");
-      c.id = "bfb-toasts";
-      document.body.appendChild(c);
-    }
-    return c;
-  }
-  var PLAIN_MS = 4e3;
-  var ACTION_MS = 6e3;
-  var dismissArmed = false;
-  function armDismissOnOutsideClick() {
-    if (dismissArmed) return;
-    dismissArmed = true;
-    const onDown = (e) => {
-      const c = document.getElementById("bfb-toasts");
-      if (!c) return;
-      if (e.target instanceof Node && c.contains(e.target)) return;
-      c.innerHTML = "";
-    };
-    document.addEventListener("mousedown", onDown, true);
-  }
-  function toast(msg, kind = "info", action, ms) {
-    const t = document.createElement("div");
-    t.className = "bfb-toast" + (kind !== "info" ? " " + kind : "");
-    t.title = "点击关闭";
-    const span = document.createElement("span");
-    span.className = "bfb-toast-msg";
-    span.textContent = msg;
-    t.appendChild(span);
-    const timeout = ms ?? (action ? ACTION_MS : PLAIN_MS);
-    const timer = setTimeout(() => t.remove(), timeout);
-    const close = () => {
-      clearTimeout(timer);
-      t.remove();
-    };
-    t.onclick = close;
-    if (action) {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.className = "bfb-toast-act";
-      b.textContent = action.label;
-      b.onclick = (e) => {
-        e.stopPropagation();
-        close();
-        action.onClick();
-      };
-      t.appendChild(b);
-    }
-    toastContainer().appendChild(t);
-    armDismissOnOutsideClick();
-  }
-
-  // src/gm.ts
-  function gmRequest(opts) {
-    if (typeof GM_xmlhttpRequest !== "function") return false;
-    GM_xmlhttpRequest(opts);
-    return true;
-  }
-
-  // src/events.ts
-  var handler = () => {
-  };
-  function setRulesChangedHandler(fn) {
-    handler = fn;
-  }
-  function emitRulesChanged() {
-    handler();
-  }
-
-  // src/subscriptions/refresh.ts
-  function metaGet(meta, key) {
-    if (!meta) return void 0;
-    if (meta[key] != null) return meta[key];
-    const lk = key.toLowerCase();
-    for (const k in meta) if (k.toLowerCase() === lk) return meta[k];
-    return void 0;
-  }
-  function cmpVer(a, b) {
-    const pa = String(a).split(".").map((n) => parseInt(n, 10) || 0);
-    const pb = String(b).split(".").map((n) => parseInt(n, 10) || 0);
-    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-      const d = (pa[i] || 0) - (pb[i] || 0);
-      if (d) return d < 0 ? -1 : 1;
-    }
-    return 0;
-  }
-  var DAY_MS = 24 * 36e5;
-  function parseExpires(s) {
-    const m = String(s ?? "").trim().match(/^(\d+)\s*([hd])?/i);
-    if (!m) return DAY_MS;
-    const n = Math.max(1, parseInt(m[1], 10) || 1);
-    return n * ((m[2] || "d").toLowerCase() === "h" ? 36e5 : DAY_MS);
-  }
-  var SUB_MAX_LEN = 2 * 1024 * 1024;
-  function fetchSubText(url, cb) {
-    const sent = gmRequest({
-      method: "GET",
-      url,
-      timeout: 15e3,
-      onload: (r) => {
-        if (!(r.status >= 200 && r.status < 300) || !r.responseText) return cb(null, "HTTP " + r.status);
-        if (r.responseText.length > SUB_MAX_LEN) return cb(null, "订阅内容过大（>2MB）");
-        cb(r.responseText, null);
-      },
-      onerror: () => cb(null, "网络错误"),
-      ontimeout: () => cb(null, "超时")
-    });
-    if (!sent) cb(null, "无 GM_xmlhttpRequest");
-  }
-  function syncSubscription(url, cb) {
-    fetchSubText(url, (text, err) => {
-      const store = loadSubStore();
-      const finish = (patch, ok) => {
-        const prev = store[url] || {};
-        if (ok) {
-          store[url] = patch;
-        } else if (prev.ok && prev.rules) {
-          store[url] = Object.assign(prev, { error: patch.error, lastError: Date.now() });
-        } else {
-          store[url] = Object.assign(prev, patch);
-        }
-        saveSubStore(store);
-        cb?.(ok);
-      };
-      if (err || !text) return finish({ lastSync: Date.now(), ok: false, error: err || "空内容" }, false);
-      try {
-        const { meta, rules } = parseSubscription(text);
-        const count = SUB_DIMS.reduce((n, d) => n + (rules[d] && rules[d].length || 0), 0);
-        finish({ meta, rules, lastSync: Date.now(), ok: true, count, error: null }, true);
-        const minV = metaGet(meta, "minScriptVersion");
-        if (minV && cmpVer(VERSION, minV) < 0) toast(`订阅「${metaGet(meta, "title") || url}」建议脚本升级到 ≥ ${minV}（部分规则可能未识别）`);
-      } catch (e) {
-        finish({ lastSync: Date.now(), ok: false, error: "解析失败" }, false);
-      }
-    });
-  }
-  function refreshSubscriptions(force, done) {
-    const store = loadSubStore();
-    const urls = new Set((CONFIG.subscriptions || []).map((s) => s && s.url).filter(Boolean));
-    let pruned = false;
-    for (const k of Object.keys(store)) {
-      if (!urls.has(k)) {
-        delete store[k];
-        pruned = true;
-      }
-    }
-    if (pruned) saveSubStore(store);
-    const due = (CONFIG.subscriptions || []).filter((s) => {
-      if (!s || !s.enabled || !s.url) return false;
-      if (force) return true;
-      const e = store[s.url];
-      if (!e || !e.ok) return true;
-      return Date.now() - (e.lastSync || 0) >= parseExpires(metaGet(e.meta, "expires"));
-    });
-    if (!due.length) return done?.(0);
-    let pending = due.length;
-    let changed = 0;
-    due.forEach(
-      (s) => syncSubscription(s.url, (ok) => {
-        if (ok) changed++;
-        if (--pending === 0) {
-          if (changed) emitRulesChanged();
-          done?.(changed);
-        }
-      })
-    );
-  }
-
   // src/hide.ts
   function hideEl(el) {
     const h = el;
@@ -2036,7 +2301,6 @@
     const saved = h.__bfbDisp;
     h.__bfbDisp = null;
     if (!saved) {
-      if (h.style.getPropertyValue("display") === "none") h.style.removeProperty("display");
       return;
     }
     if (saved.value) h.style.setProperty("display", saved.value, saved.priority);
@@ -2053,14 +2317,21 @@
   function asCommentHost(el) {
     return el && el.tagName && isCommentTag(el.tagName) ? el : null;
   }
+  function replyTargetFromMessage(message) {
+    const m = String(message || "").match(/^回复\s*@(.+?)\s*[:：]/u);
+    return m ? m[1].trim() : "";
+  }
   function cmtCleanMsg(msg, isSub) {
     let s = (msg || "").toString();
-    if (isSub) s = s.replace(/^回复\s?@[^@\s:：]+\s?[:：]/, "");
+    if (isSub) s = s.replace(/^回复\s*@.+?\s*[:：]/u, "");
     return s.replace(/@[^@\s]+/g, " ").replace(/(\[[^[\]]+\])+/g, " ").trim();
   }
   var EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE00}-\u{FE0F}\u{1F1E6}-\u{1F1FF}\u200d\u{20E3}]/gu;
   function readCmt(host) {
     const d = host && host.__data || {};
+    return readCmtData(d, { upMid: host?.__upMid, me: host?.__user?.uname });
+  }
+  function readCmtData(d, context = {}) {
     const member = d.member || {};
     const content = d.content || {};
     const lv = member.level_info && member.level_info.current_level;
@@ -2068,16 +2339,21 @@
     return {
       uname: ((member.uname || "") + "").trim(),
       mid: d.mid,
+      rpid: d.rpid,
+      parentId: d.parent,
+      replyToUname: replyTargetFromMessage(content.message),
       level: typeof lv === "number" ? lv : null,
       noface: (member.avatar || "").endsWith("noface.jpg") && (vipStatus === 0 || vipStatus == null),
       message: (content.message || "") + "",
       members: Array.isArray(content.members) ? content.members : [],
       isUpTop: !!(d.reply_control && d.reply_control.is_up_top),
-      upMid: host ? host.__upMid : void 0,
-      // B 站组件挂的视频 UP mid（可能缺，缺则 isUp 白名单不生效）
-      me: host && host.__user ? host.__user.uname : void 0
-      // 当前登录用户名（可能缺）
+      upMid: context.upMid,
+      me: context.me
     };
+  }
+  function resolveReplyTarget(c, authors2) {
+    const parentKey = c.parentId == null || String(c.parentId) === "0" ? "" : String(c.parentId);
+    return parentKey && authors2 && authors2.get(parentKey) || c.replyToUname;
   }
   function matchComment(c, isSub) {
     const cc = CONFIG.comment;
@@ -2085,6 +2361,9 @@
     if (cc.allowPin && !isSub && c.isUpTop) return null;
     if (cc.allowMe && c.me && (c.uname === c.me || c.message.includes("@" + c.me))) return null;
     if (c.uname && M.cmtUserSet.has(lc(c.uname))) return "评论用户:" + c.uname;
+    if (cc.hideRepliesToBlockedUsers && isSub && c.replyToUname && M.cmtUserSet.has(lc(c.replyToUname))) {
+      return "回复已屏蔽用户:" + c.replyToUname;
+    }
     if (c.uname && textHit(c.uname, M.cmtUserKw)) return "评论昵称词";
     const clean = cmtCleanMsg(c.message, isSub);
     if (textHit(clean, M.cmtKw)) return "评论关键词";
@@ -2167,10 +2446,13 @@
       host.__bfbCmtPh = null;
     }
   }
-  var processComment = safe("processComment", function(host, isSub) {
-    if (host.__bfbCmtV === ruleVersion) return;
+  var processComment = safe("processComment", function(host, isSub, authors2) {
+    if (host.__bfbCmtV === ruleVersion && !host.__bfbCmtReplyPending) return;
     const c = readCmt(host);
     if (!c.uname && !c.message) return;
+    const parentKey = c.parentId == null || String(c.parentId) === "0" ? "" : String(c.parentId);
+    c.replyToUname = resolveReplyTarget(c, authors2);
+    host.__bfbCmtReplyPending = !!(CONFIG.comment.hideRepliesToBlockedUsers && isSub && parentKey && !c.replyToUname);
     host.__bfbCmtV = ruleVersion;
     const reason = matchComment(c, isSub);
     if (reason) {
@@ -2216,6 +2498,7 @@
         host.removeAttribute("title");
         host.__bfbCmtHit = false;
         host.__bfbCmtExpanded = false;
+        host.__bfbCmtReplyPending = false;
         host.__bfbCmtV = void 0;
       }
     }
@@ -2227,13 +2510,25 @@
       return;
     }
     let cmtHosts = 0;
+    let authors2 = null;
+    if (CONFIG.comment.hideRepliesToBlockedUsers && M.cmtUserSet.size > 0) {
+      authors2 = /* @__PURE__ */ new Map();
+      for (const root of commentRoots) {
+        const host = hostOf(root);
+        if (!host || !host.isConnected) continue;
+        const d = host.__data;
+        const rpid = d && d.rpid;
+        const uname = d && d.member && String(d.member.uname || "").trim();
+        if (rpid != null && String(rpid) !== "0" && uname) authors2.set(String(rpid), uname);
+      }
+    }
     for (const root of commentRoots) {
       const host = hostOf(root);
       if (!host || !host.isConnected) continue;
       const isSub = COMMENT_TAGS[host.tagName];
       if (isSub === void 0) continue;
       cmtHosts++;
-      processComment(host, isSub);
+      processComment(host, isSub, authors2);
     }
     if (CONFIG.debug) {
       const tags = {};
@@ -2248,14 +2543,1108 @@
       }
     }
   }
-  var cmtTimer = null;
+  var cmtQueued = false;
   function scheduleCommentScan() {
     if (!CONFIG.comment.enabled) return;
-    if (cmtTimer) return;
-    cmtTimer = setTimeout(() => {
-      cmtTimer = null;
+    if (cmtQueued) return;
+    cmtQueued = true;
+    queueMicrotask(() => {
+      cmtQueued = false;
       scanComments();
-    }, 300);
+    });
+  }
+
+  // src/comment-data.ts
+  var isCommentUrl = (url) => /\/x\/v2\/reply\/(?:wbi\/main|main|reply)(?:[?]|$)/.test(url);
+  var authors = /* @__PURE__ */ new Map();
+  function filterCommentJson(url, json) {
+    if (!isCommentUrl(url) || json?.code !== 0 || !json.data || !CONFIG.enabled || !CONFIG.comment.enabled || CONFIG.reviewMode || CONFIG.comment.collapse) return 0;
+    const data = json.data;
+    const scope = (() => {
+      try {
+        const q2 = new URL(url, "https://api.bilibili.com").searchParams;
+        return (q2.get("type") || "") + ":" + (q2.get("oid") || "");
+      } catch (e) {
+        return "";
+      }
+    })();
+    const context = { upMid: data.upper?.mid, me: data.current_user?.uname };
+    const list = [];
+    const pinnedItems = /* @__PURE__ */ new Set();
+    const visit = (arr, pinned = false) => {
+      if (!Array.isArray(arr)) return;
+      list.push(arr);
+      for (const d of arr) {
+        if (!d || typeof d !== "object") continue;
+        if (pinned) pinnedItems.add(d);
+        if (d.rpid != null && d.member?.uname) capMapSet(authors, scope + ":" + d.rpid, String(d.member.uname).trim(), 3e3);
+        visit(d.replies);
+      }
+    };
+    visit(data.replies);
+    visit(data.hots);
+    visit(data.top_replies, true);
+    const topSlots = [];
+    for (const [key, d] of Object.entries(data.top || {})) {
+      if (d && typeof d === "object") {
+        const arr = [d];
+        topSlots.push({ key, list: arr });
+        visit(arr, true);
+      }
+    }
+    const replyAuthors = /* @__PURE__ */ new Map();
+    for (const [key, name] of authors) if (key.startsWith(scope + ":")) replyAuthors.set(key.slice(scope.length + 1), name);
+    let removed = 0;
+    const recorded = /* @__PURE__ */ new Set();
+    const selfMid = typeof document !== "undefined" ? document.cookie.match(/(?:^|;\s*)DedeUserID=(\d+)/)?.[1] : "";
+    const seen = /* @__PURE__ */ new Set();
+    for (const arr of list) {
+      if (seen.has(arr)) continue;
+      seen.add(arr);
+      for (let i = arr.length - 1; i >= 0; i--) {
+        const d = arr[i];
+        if (!d || typeof d !== "object") continue;
+        const c = readCmtData(d, context);
+        if (pinnedItems.has(d)) c.isUpTop = true;
+        const isSub = !!c.parentId && String(c.parentId) !== "0";
+        c.replyToUname = resolveReplyTarget(c, replyAuthors);
+        if (CONFIG.comment.allowUp && context.upMid == null) continue;
+        if (CONFIG.comment.allowMe && !context.me && selfMid && (String(c.mid) === selfMid || c.members.some((m) => String(m.mid) === selfMid) || c.message.includes("@"))) continue;
+        const reason = matchComment(c, isSub);
+        if (!reason) continue;
+        arr.splice(i, 1);
+        removed++;
+        const id = String(c.rpid || c.uname + ":" + c.message);
+        if (!recorded.has(id)) {
+          recorded.add(id);
+          recordBlock(reason, { up: c.uname, title: c.message.slice(0, 40) }, "CMT");
+        }
+      }
+    }
+    for (const slot of topSlots) if (!slot.list.length) data.top[slot.key] = null;
+    return removed;
+  }
+
+  // src/net-xhr.ts
+  function installXhrHooks(W, filters) {
+    const proto = W.XMLHttpRequest?.prototype;
+    if (!proto || proto.__bfb) return;
+    const open = proto.open;
+    const abort = proto.abort;
+    const text2 = Object.getOwnPropertyDescriptor(proto, "responseText")?.get;
+    const response = Object.getOwnPropertyDescriptor(proto, "response")?.get;
+    const state = Object.getOwnPropertyDescriptor(proto, "readyState")?.get;
+    if (!text2 || !response || !state) return;
+    const active = /* @__PURE__ */ new WeakMap();
+    proto.open = function(method, url, async = true, user, password) {
+      const xhr = this;
+      active.get(xhr)?.cleanup();
+      active.delete(xhr);
+      const target = typeof url === "string" ? filters.rewrite(url) : String(url);
+      filters.note(target);
+      if (!filters.matches(target)) return open.call(xhr, method, target, async, user, password);
+      const context = filters.context?.(target);
+      const endPending = filters.begin?.(target);
+      let pending2 = true;
+      const settled = () => {
+        if (pending2) {
+          pending2 = false;
+          endPending?.();
+        }
+      };
+      let closed = false;
+      let gating = false;
+      let complete = false;
+      let replay = false;
+      let parsed = false;
+      let json;
+      let raw;
+      let result;
+      let resultText;
+      const events = [];
+      const rawState = () => state.call(xhr);
+      const canFilter = () => xhr.responseType === "" || xhr.responseType === "text" || xhr.responseType === "json";
+      const parse = () => {
+        if (parsed) return;
+        parsed = true;
+        raw = response.call(xhr);
+        if (xhr.responseType === "json") json = raw;
+        else if (typeof raw === "string" && raw) {
+          try {
+            json = JSON.parse(raw);
+          } catch (e) {
+          }
+        }
+      };
+      const commit = (changed) => {
+        if (xhr.responseType === "json") result = json ?? raw;
+        else {
+          resultText = changed ? JSON.stringify(json) : raw;
+          result = resultText;
+        }
+        complete = true;
+        settled();
+      };
+      const syncRead = () => {
+        if (complete) return;
+        parse();
+        let changed = 0;
+        try {
+          if (json) changed = filters.sync(target, json, context);
+        } catch (e) {
+        }
+        commit(changed);
+      };
+      Object.defineProperties(xhr, {
+        readyState: { configurable: true, get: () => gating ? 3 : rawState() },
+        responseText: {
+          configurable: true,
+          get: () => {
+            if (xhr.responseType !== "" && xhr.responseType !== "text") return text2.call(xhr);
+            if (gating || async && rawState() === 3) return "";
+            if (rawState() !== 4 || !canFilter()) return text2.call(xhr);
+            syncRead();
+            return resultText;
+          }
+        },
+        response: {
+          configurable: true,
+          get: () => {
+            if (gating || async && rawState() === 3 && canFilter()) return xhr.responseType === "json" ? null : "";
+            if (rawState() !== 4 || !canFilter()) return response.call(xhr);
+            syncRead();
+            return result;
+          }
+        }
+      });
+      const makeEvent = (event) => {
+        if (W.ProgressEvent && "loaded" in event) {
+          const p = event;
+          return new W.ProgressEvent(event.type, { lengthComputable: p.lengthComputable, loaded: p.loaded, total: p.total });
+        }
+        return new (W.Event || Event)(event.type);
+      };
+      const flush = () => {
+        if (closed) return;
+        gating = false;
+        replay = true;
+        try {
+          for (const event of events) {
+            if (closed) break;
+            xhr.dispatchEvent(makeEvent(event));
+          }
+        } finally {
+          replay = false;
+          events.length = 0;
+        }
+      };
+      const capture = (event) => {
+        if (closed || replay || complete || !async || !canFilter() || xhr.status === 0) return;
+        const rs = rawState();
+        if (rs === 3 && (event.type === "readystatechange" || event.type === "progress")) {
+          event.stopImmediatePropagation();
+          return;
+        }
+        if (rs !== 4) return;
+        event.stopImmediatePropagation();
+        events.push(event);
+        if (gating) return;
+        gating = true;
+        parse();
+        Promise.resolve().then(() => json ? filters.async(target, json, context) : 0).then(
+          (changed) => {
+            if (!closed) {
+              commit(changed);
+              flush();
+            }
+          },
+          () => {
+            if (!closed) {
+              commit(0);
+              flush();
+            }
+          }
+        );
+      };
+      const types = ["readystatechange", "progress", "load", "loadend"];
+      for (const type of types) xhr.addEventListener(type, capture, true);
+      const finishedNative = () => {
+        if (!gating) settled();
+      };
+      for (const type of ["loadend", "error", "abort", "timeout"]) xhr.addEventListener(type, finishedNative, true);
+      const cleanup = () => {
+        closed = true;
+        settled();
+        events.length = 0;
+        for (const type of types) xhr.removeEventListener(type, capture, true);
+        for (const type of ["loadend", "error", "abort", "timeout"]) xhr.removeEventListener(type, finishedNative, true);
+        for (const prop of ["readyState", "responseText", "response"]) Reflect.deleteProperty(xhr, prop);
+      };
+      active.set(xhr, {
+        cleanup,
+        cancel: () => {
+          const wasGating = gating;
+          cleanup();
+          return wasGating;
+        }
+      });
+      try {
+        return open.call(xhr, method, target, async, user, password);
+      } catch (e) {
+        cleanup();
+        active.delete(xhr);
+        throw e;
+      }
+    };
+    proto.abort = function() {
+      const cancelled = active.get(this)?.cancel();
+      active.delete(this);
+      const value = abort.call(this);
+      if (cancelled) {
+        for (const type of ["readystatechange", "abort", "loadend"]) this.dispatchEvent(new (W.Event || Event)(type));
+      }
+      return value;
+    };
+    proto.__bfb = true;
+  }
+
+  // src/net.ts
+  function searchVideoSources(data) {
+    if (!Array.isArray(data?.result)) return [];
+    const groups = data.result;
+    if (!groups.length || !groups[0]?.result_type) {
+      return !groups.length || groups.some((it) => it?.type === "video" || it?.bvid) ? [{ items: groups }] : [];
+    }
+    const sources = [];
+    for (const group of groups) {
+      if (!Array.isArray(group?.data)) continue;
+      if (group.result_type === "video") sources.push({ items: group.data });
+      if (group.result_type === "bili_user" || group.result_type === "user") {
+        for (const user of group.data) if (Array.isArray(user?.res)) {
+          sources.push({ items: user.res, norm: (it) => it && normFeedItem({ ...it, owner: { mid: user.mid, name: user.uname } }) });
+        }
+      }
+    }
+    return sources;
+  }
+  var feedSources = (hook, data) => {
+    if (hook.lists) return hook.lists(data);
+    const items = hook.get(data);
+    return items ? [{ items, norm: hook.norm }] : [];
+  };
+  var FEED_HOOKS = [
+    { re: /\/x\/web-interface\/wbi\/index\/top\/feed\/rcmd/, get: (d) => d && Array.isArray(d.item) ? d.item : null },
+    { re: /\/x\/web-interface\/index\/top\/feed\/rcmd/, get: (d) => d && Array.isArray(d.item) ? d.item : null },
+    { re: /\/x\/web-interface\/ranking\/v2/, get: (d) => d && Array.isArray(d.list) ? d.list : null },
+    { re: /\/x\/web-interface\/popular(\/|\?|$)/, get: (d) => d && Array.isArray(d.list) ? d.list : null },
+    { re: /\/x\/web-interface\/archive\/related/, get: (d) => Array.isArray(d) ? d : null },
+    // 搜索页：type=视频 时 data.result 直接是视频数组；综合(all/v2) 时 data.result 是分组，取 result_type==='video' 的 data
+    {
+      re: /\/x\/web-interface\/(?:wbi\/)?search\/(type|all\/v2)/,
+      get: (d) => {
+        if (!d || !Array.isArray(d.result)) return null;
+        if (d.result.length && d.result[0] && d.result[0].result_type) {
+          const g = d.result.find((x) => x.result_type === "video");
+          return g && Array.isArray(g.data) ? g.data : null;
+        }
+        return searchVideoSources(d)[0]?.items || null;
+      },
+      lists: searchVideoSources
+    },
+    // 动态流（t.bilibili.com）。此前这是唯一一个完全靠 DOM 兜底的主要页面——DOM 层只能在卡片
+    // 画出来之后再隐藏，且抠不到 UID 这类权威字段。接到拦截层后与首页同源同判。
+    // 只删 data.items 里的项，不动 offset/has_more：分页游标由 B 站维护，改它会打乱后续加载。
+    { re: /\/x\/polymer\/web-dynamic\/v1\/feed\/(all|space)/, get: (d) => d && Array.isArray(d.items) ? d.items : null, norm: normDynamicItem }
+  ];
+  var memoUrl = null;
+  var memoHook = null;
+  function findFeedHook(url) {
+    if (!url) return null;
+    if (url === memoUrl) return memoHook;
+    let hit = null;
+    for (const h of FEED_HOOKS) {
+      if (h.re.test(url)) {
+        hit = h;
+        break;
+      }
+    }
+    memoUrl = url;
+    memoHook = hit;
+    return hit;
+  }
+  var isFeedUrl = (url) => !!findFeedHook(url);
+  var isFilteredUrl = (url) => isFeedUrl(url) || isCommentUrl(url) || isMetadataUrl(url);
+  function filterVideoList(arr, norm = normFeedItem, record = (reason, info) => recordBlock(reason, info, "NET")) {
+    if (!CONFIG.enabled || CONFIG.reviewMode) return 0;
+    let removed = 0;
+    for (let i = arr.length - 1; i >= 0; i--) {
+      try {
+        const info = norm(arr[i]);
+        if (!info) continue;
+        const verdict = dataVerdict(info.bvid, info.title, info.uid);
+        const reason = verdict ? verdict.reason : immediateVerdict(info)?.reason;
+        if (reason) {
+          record(reason, verdict?.info || info);
+          arr.splice(i, 1);
+          removed++;
+        }
+      } catch (e) {
+        log("拦截层 单项判定异常（已跳过）", e);
+      }
+    }
+    return removed;
+  }
+  async function prepareVideoList(arr, norm = normFeedItem) {
+    if (!CONFIG.enabled || CONFIG.reviewMode) return;
+    const deadline = Date.now() + FILTER_WAIT_MS;
+    health.pendingFilters++;
+    try {
+      await Promise.all(arr.map(async (item) => {
+        try {
+          const info = norm(item);
+          if (info) await evaluateVideo(info, deadline, true);
+        } catch (e) {
+          log("拦截层 异步判定异常（已放行）", e);
+        }
+      }));
+    } finally {
+      health.pendingFilters--;
+    }
+  }
+  function filterFeedJson(url, json) {
+    if (!json || json.code !== 0 || !json.data) return 0;
+    const hook = findFeedHook(url);
+    if (!hook) return 0;
+    const sources = feedSources(hook, json.data);
+    if (!sources.length) return 0;
+    health.feedParsed++;
+    health.feedItems += sources.reduce((count, source) => count + source.items.length, 0);
+    let removed = 0;
+    for (const { items, norm } of sources) {
+      for (const it of items) if (it?.stat?.like != null || it?.stats?.like != null) health.feedLikes++;
+      removed += filterVideoList(items, norm);
+      health.feedKept += items.length;
+    }
+    if (removed) log(`拦截层 删除 ${removed} 项 @ ${url.split("?")[0]}`);
+    return removed;
+  }
+  async function filterFeedJsonAsync(url, json) {
+    if (!json || json.code !== 0 || !json.data) return 0;
+    const hook = findFeedHook(url);
+    if (!hook) return 0;
+    const sources = feedSources(hook, json.data);
+    if (!sources.length) return 0;
+    await Promise.all(sources.map(({ items, norm }) => prepareVideoList(items, norm)));
+    return filterFeedJson(url, json);
+  }
+  var SIGNED_RE = /[?&]w_rid=/;
+  var NET = /* @__PURE__ */ (() => {
+    const preFns = [];
+    const postFns = [];
+    return {
+      addPre: (fn) => preFns.push(fn),
+      addPost: (fn, asyncFn = fn) => postFns.push({ sync: fn, async: asyncFn }),
+      hasPre: () => preFns.length > 0,
+      rewriteUrl(url) {
+        let u = url;
+        for (const fn of preFns) {
+          try {
+            const r = fn(u);
+            if (typeof r === "string" && r) u = r;
+          } catch (e) {
+            logErr("NET.pre", e);
+          }
+        }
+        if (u !== url && SIGNED_RE.test(url)) {
+          health.signedSkipped++;
+          return url;
+        }
+        return u;
+      },
+      runJson(url, json) {
+        let removed = 0;
+        for (const fn of postFns) {
+          try {
+            removed += fn.sync(url, json) || 0;
+          } catch (e) {
+            logErr("NET.post", e);
+          }
+        }
+        return removed;
+      },
+      async runJsonAsync(url, json) {
+        let removed = 0;
+        for (const fn of postFns) {
+          try {
+            removed += await fn.async(url, json) || 0;
+          } catch (e) {
+            logErr("NET.post.async", e);
+          }
+        }
+        return removed;
+      }
+    };
+  })();
+  function rewriteRequestUrl(url) {
+    return NET.hasPre() ? NET.rewriteUrl(url) : url;
+  }
+  var RCMD_RE = /\/x\/web-interface\/(wbi\/)?index\/top\/feed\/rcmd/;
+  var homeFeedEpoch = 0;
+  function advanceHomeFeedEpoch() {
+    homeFeedEpoch++;
+  }
+  var homeRequestContext = (url) => RCMD_RE.test(url) && location.hostname === "www.bilibili.com" && location.pathname === "/" ? homeFeedEpoch : void 0;
+  function discardStaleHomeFeed(json, context, note = true) {
+    if (typeof context !== "number" || context === homeFeedEpoch) return null;
+    const arr = json?.code === 0 && json.data?.item;
+    if (!Array.isArray(arr)) return null;
+    if (note) health.feedParsed++;
+    const count = arr.length;
+    arr.length = 0;
+    return count;
+  }
+  NET.addPost(filterFeedJson, filterFeedJsonAsync);
+  NET.addPost(filterCommentJson);
+  NET.addPost((url, json) => {
+    observeMetadata(url, json);
+    return 0;
+  });
+  NET.addPre((url) => {
+    if (!CONFIG.boostFeedLoad) return;
+    if (RCMD_RE.test(url) && /[?&]ps=\d+/.test(url)) {
+      return url.replace(/([?&]ps=)\d+/, "$130");
+    }
+  });
+  async function filterResponseJson(url, json, context) {
+    const stale = discardStaleHomeFeed(json, context);
+    if (stale !== null) return stale;
+    const removed = await NET.runJsonAsync(url, json);
+    return removed + (discardStaleHomeFeed(json, context, false) || 0);
+  }
+  function installNetworkHooks() {
+    const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+    const RespCtor = W.Response || Response;
+    if (typeof W.fetch === "function" && !W.fetch.__bfb) {
+      const origFetch = W.fetch;
+      const wrapped = function(input, init) {
+        let input2 = input;
+        if (typeof input === "string") input2 = rewriteRequestUrl(input);
+        const url = typeof input2 === "string" ? input2 : input2?.url || input2?.href || "";
+        const signal = init?.signal || input?.signal;
+        const context = homeRequestContext(url);
+        const p = origFetch.call(this, input2, init);
+        health.noteRequest(url);
+        if (!isFilteredUrl(url)) return p;
+        const feed = isFeedUrl(url);
+        if (feed) {
+          health.feedMatched++;
+          health.pendingResponses++;
+        }
+        return p.then(async (resp) => {
+          const checkAbort = () => {
+            if (signal?.aborted) throw signal.reason || new (W.DOMException || DOMException)("The operation was aborted.", "AbortError");
+          };
+          let json;
+          try {
+            json = await resp.clone().json();
+          } catch (e) {
+            checkAbort();
+            return resp;
+          }
+          checkAbort();
+          const changed = await filterResponseJson(url, json, context);
+          checkAbort();
+          if (!changed) return resp;
+          const h = new (W.Headers || Headers)(resp.headers);
+          h.delete("content-encoding");
+          h.delete("content-length");
+          const filtered = new RespCtor(JSON.stringify(json), { status: resp.status, statusText: resp.statusText, headers: h });
+          const preserve = (out) => {
+            for (const key of ["url", "type", "redirected"]) Object.defineProperty(out, key, { value: resp[key], configurable: true });
+            const clone = out.clone.bind(out);
+            out.clone = () => preserve(clone());
+            return out;
+          };
+          return preserve(filtered);
+        }).finally(() => {
+          if (feed) health.pendingResponses--;
+        });
+      };
+      wrapped.__bfb = true;
+      try {
+        W.fetch = wrapped;
+      } catch (e) {
+        logErr("installNetworkHooks.fetch", e);
+      }
+    }
+    installXhrHooks(W, {
+      matches: isFilteredUrl,
+      rewrite: rewriteRequestUrl,
+      note: (url) => {
+        health.noteRequest(url);
+        if (isFeedUrl(url)) health.feedMatched++;
+      },
+      context: homeRequestContext,
+      begin: (url) => {
+        const feed = isFeedUrl(url);
+        if (feed) health.pendingResponses++;
+        return () => {
+          if (feed) health.pendingResponses--;
+        };
+      },
+      sync: (url, json, context) => discardStaleHomeFeed(json, context) ?? NET.runJson(url, json),
+      async: filterResponseJson
+    });
+  }
+
+  // src/initial-search.ts
+  function nativeSearchEvents(app) {
+    const provides = (app?._instance || app?._container?._vnode?.component)?.provides;
+    for (const key of Reflect.ownKeys(provides || {})) {
+      const bus = provides[key];
+      if (typeof bus?.emit === "function" && typeof bus?.all?.has === "function" && bus.all.has("submitSearch")) return bus;
+    }
+    return null;
+  }
+  function replayInitialVideoSearch(app, state, context) {
+    const store = state?.searchTypeResponse;
+    const snapshot = store?.searchTypeResponse;
+    const original = store?.querySearchByType;
+    const bus = nativeSearchEvents(app);
+    if (!bus || typeof original !== "function" || !Array.isArray(snapshot?.result) || !context.isCurrent()) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      let finished = false;
+      const restore = () => {
+        if (store.querySearchByType === wrapped) store.querySearchByType = original;
+      };
+      const finish = (replayed) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        restore();
+        resolve(replayed);
+      };
+      const wrapped = function(params, ...rest) {
+        restore();
+        if (!context.isCurrent() || params?.search_type !== "video" || params.keyword !== context.keyword || Number(params.page) !== context.page) {
+          finish(false);
+          return original.apply(this, [params, ...rest]);
+        }
+        queueMicrotask(() => queueMicrotask(() => finish(true)));
+        return Promise.resolve(snapshot);
+      };
+      const timer = setTimeout(() => finish(false), context.waitMs ?? 500);
+      try {
+        store.querySearchByType = wrapped;
+        bus.emit("submitSearch");
+      } catch (e) {
+        finish(false);
+      }
+    });
+  }
+
+  // src/initial-data.ts
+  var pendingContainers = /* @__PURE__ */ new Map();
+  var observedStates = /* @__PURE__ */ new WeakMap();
+  var isInitialStatePending = (card) => [...pendingContainers].some(([selector, count]) => count > 0 && (!card || !!card.closest(selector)));
+  var unwrapState = (value) => value?.__v_isRef ? value.value : value;
+  function piniaStateFromApp(app) {
+    const provides = app?._context?.provides;
+    if (!provides) return null;
+    for (const key of Reflect.ownKeys(provides)) {
+      const stores = provides[key]?._s;
+      if (!stores || typeof stores.get !== "function") continue;
+      const state = {};
+      for (const name of ["feed", "searchResponse", "searchTypeResponse"]) {
+        const store = stores.get(name);
+        if (store) state[name] = store;
+      }
+      if (Object.keys(state).length) return state;
+    }
+    return null;
+  }
+  function notifyInitialState(state) {
+    for (const [storeName, field] of [["feed", "data"], ["searchResponse", "searchAllResponse"], ["searchTypeResponse", "searchTypeResponse"]]) {
+      const store = unwrapState(state?.[storeName]);
+      const current2 = store?.[field];
+      const value = unwrapState(current2);
+      if (!value || typeof value !== "object") continue;
+      if (current2?.__v_isRef) current2.value = { ...value };
+      else store[field] = { ...value };
+    }
+  }
+  function initialVideoSources(state) {
+    if (!state || typeof state !== "object") return [];
+    const feed = unwrapState(unwrapState(state.feed)?.data);
+    const candidates = [feed?.recommend?.item, feed?.head?.recommend, state.recommendData?.item, state.related, state.videoRelated, state.rankList, state.videoList];
+    const sources = candidates.filter(Array.isArray).map((items) => ({ items }));
+    sources.push(...searchVideoSources(unwrapState(unwrapState(state.searchResponse)?.searchAllResponse)));
+    sources.push(...searchVideoSources(unwrapState(unwrapState(state.searchTypeResponse)?.searchTypeResponse)));
+    const seen = /* @__PURE__ */ new Set();
+    return sources.filter(({ items }) => !seen.has(items) && !!seen.add(items));
+  }
+  var initialCount = (sources) => new Set(sources.flatMap(({ items }) => items.map((it) => it?.bvid || it))).size;
+  function filterInitialState(state) {
+    observeInitialMetadata(state);
+    const sources = initialVideoSources(state);
+    if (sources.length && !observedStates.has(state)) {
+      health.initialParsed++;
+      health.initialItems += initialCount(sources);
+    }
+    const recorded = /* @__PURE__ */ new Set();
+    const record = (reason, info) => {
+      if (!info) return;
+      const key = info.bvid || info.uid + ":" + info.title;
+      if (recorded.has(key)) return;
+      recorded.add(key);
+      if (info.bvid && blockedLog.some((x) => x.bvid === info.bvid && x.src === "DOM")) return;
+      recordBlock(reason, info, "NET");
+    };
+    const removed = sources.reduce((count, { items, norm }) => count + filterVideoList(items, norm, record), 0);
+    if (sources.length) {
+      const kept = initialCount(sources);
+      health.initialKept += kept - (observedStates.get(state) || 0);
+      observedStates.set(state, kept);
+    }
+    return removed;
+  }
+  function installInitialStateHooks(onReady) {
+    const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+    const process = (state) => {
+      try {
+        observeInitialMetadata(state);
+        if (!CONFIG.enabled || CONFIG.reviewMode) {
+          filterInitialState(state);
+          return;
+        }
+        const sources = initialVideoSources(state);
+        const needsGate = sources.some(({ items, norm = normFeedItem }) => items.some((it) => {
+          const info = norm(it);
+          if (!info) return false;
+          const verdict = immediateVerdict(info);
+          return !verdict || !!verdict.reason;
+        }));
+        if (!needsGate) {
+          filterInitialState(state);
+          return;
+        }
+        const started = Date.now();
+        const pageKey = location.pathname + location.search;
+        const home = location.hostname === "www.bilibili.com" && location.pathname === "/";
+        const container = home ? HOME_RECOMMEND_CONTAINER : location.hostname === "search.bilibili.com" ? SEARCH_VIDEO_CONTAINER : VIDEO_CARD_SELECTORS.join(",");
+        pendingContainers.set(container, (pendingContainers.get(container) || 0) + 1);
+        const style = document.createElement("style");
+        style.textContent = `${container}{visibility:hidden!important}`;
+        (document.head || document.documentElement)?.appendChild(style);
+        let finished = false;
+        let mountTimer;
+        const mountedApp = () => document.querySelector("#app")?.__vue_app__ || document.querySelector("#i_cecream")?.__vue_app__;
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(watchdog);
+          clearTimeout(mountTimer);
+          const app = mountedApp();
+          let live;
+          let removed = 0;
+          try {
+            if (app) {
+              live = piniaStateFromApp(app) || state;
+              removed = filterInitialState(live);
+              if (removed) notifyInitialState(live);
+            }
+          } catch (e) {
+            logErr("首屏状态过滤", e);
+          }
+          const release = () => queueMicrotask(() => {
+            const count = (pendingContainers.get(container) || 1) - 1;
+            if (count) pendingContainers.set(container, count);
+            else pendingContainers.delete(container);
+            try {
+              onReady();
+            } catch (e) {
+              logErr("首屏兜底扫描", e);
+            }
+            requestAnimationFrame(() => {
+              try {
+                onReady();
+              } finally {
+                style.remove();
+              }
+            });
+          });
+          const remaining = FILTER_WAIT_MS + 500 - (Date.now() - started);
+          if (removed && app && location.hostname === "search.bilibili.com" && location.pathname === "/video" && remaining > 0) {
+            const query = new URLSearchParams(location.search);
+            const version = ruleVersion;
+            Promise.resolve().then(() => replayInitialVideoSearch(app, live, {
+              keyword: query.get("keyword") || "",
+              page: Number(query.get("page") || 1),
+              waitMs: Math.min(500, remaining),
+              isCurrent: () => CONFIG.enabled && !CONFIG.reviewMode && ruleVersion === version && location.pathname + location.search === pageKey
+            })).then(release, release);
+          } else release();
+        };
+        const watchdog = setTimeout(finish, FILTER_WAIT_MS + 500);
+        const waitForMount = () => {
+          if (finished) return;
+          if (mountedApp()) finish();
+          else mountTimer = setTimeout(waitForMount, 20);
+        };
+        Promise.all(sources.map(({ items, norm }) => prepareVideoList(items, norm))).then(waitForMount, waitForMount);
+      } catch (e) {
+        logErr("首屏状态钩子", e);
+      }
+    };
+    for (const key of ["__pinia", "__INITIAL_STATE__"]) {
+      const descriptor = Object.getOwnPropertyDescriptor(W, key);
+      if (descriptor && (!descriptor.configurable || descriptor.get || descriptor.set)) continue;
+      let value = descriptor?.value;
+      try {
+        Object.defineProperty(W, key, {
+          configurable: true,
+          enumerable: descriptor?.enumerable ?? true,
+          get: () => value,
+          set: (next) => {
+            value = next;
+            process(next);
+          }
+        });
+        if (value) process(value);
+      } catch (e) {
+        logErr("installInitialStateHooks", e);
+      }
+    }
+  }
+
+  // src/home-refresh.ts
+  function createHomeRefreshHandler(deps) {
+    let busy = false;
+    return (event) => {
+      if (!deps.enabled() || !deps.isHome() || event.button !== 0) return;
+      const target = event.target;
+      if (target?.closest(HOME_FULL_REFRESH)) {
+        if (!busy && !deps.loading()) deps.onFullRefresh?.();
+        return;
+      }
+      const button = target?.closest(HOME_ROLL_BUTTON);
+      if (!button) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (busy || deps.loading()) return;
+      const refresh = deps.fullRefresh();
+      if (!refresh) {
+        deps.reload();
+        return;
+      }
+      busy = true;
+      const disabled = button.disabled;
+      button.disabled = true;
+      const started = deps.now();
+      const finish = () => {
+        busy = false;
+        button.disabled = disabled;
+      };
+      const check = () => {
+        const elapsed = deps.now() - started;
+        if (elapsed >= 2e4 || elapsed >= 600 && !deps.loading()) finish();
+        else deps.later(check, 100);
+      };
+      try {
+        deps.onFullRefresh?.();
+        refresh.click();
+        deps.later(check, 100);
+      } catch (e) {
+        finish();
+        logErr("首页完整刷新", e);
+        deps.reload();
+      }
+    };
+  }
+  function installHomeRefresh() {
+    const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+    document.addEventListener("click", createHomeRefreshHandler({
+      enabled: () => CONFIG.enabled,
+      isHome: () => location.hostname === "www.bilibili.com" && location.pathname === "/",
+      fullRefresh: () => document.querySelector(HOME_FULL_REFRESH),
+      loading: () => !!unwrapState(unwrapState(W.__pinia?.feed)?.data)?.loading,
+      reload: () => location.reload(),
+      now: () => Date.now(),
+      later: (cb, ms) => setTimeout(cb, ms),
+      onFullRefresh: advanceHomeFeedEpoch
+    }), true);
+  }
+
+  // src/home-grid.ts
+  var NAMES = /* @__PURE__ */ new Set(["RecommendContainer_FloorAside", "RecommendContainer_Overseas"]);
+  var adapters = /* @__PURE__ */ new Set();
+  var counted = /* @__PURE__ */ new Set();
+  var hasClass = (node, name) => typeof node?.props?.class === "string" && node.props.class.split(/\s+/).includes(name);
+  var isSkeleton = (props) => props?.skeleton === true || props?.skeleton === "";
+  var cloneChildren = (node, children2) => ({ ...node, children: children2, dynamicChildren: null, patchFlag: -2 });
+  function blocked(item) {
+    const info = normFeedItem(item);
+    if (!info) return false;
+    const v = dataVerdict(info.bvid, info.title, info.uid) || immediateVerdict(info);
+    if (!v?.reason) return false;
+    const key = v.version + ":" + (info.bvid || info.uid + ":" + info.title);
+    if (!counted.has(key)) {
+      counted.add(key);
+      if (counted.size > 2e3) counted.delete(counted.values().next().value);
+      recordBlock(v.reason, v.info, "NET");
+    }
+    return true;
+  }
+  function adaptHomeRender(tree, videoTemplate) {
+    if (!CONFIG.enabled || CONFIG.reviewMode) return tree;
+    let template = videoTemplate;
+    const floorTypes = /* @__PURE__ */ new Set();
+    const discover = (node) => {
+      if (Array.isArray(node)) {
+        node.forEach(discover);
+        return;
+      }
+      if (!node || typeof node !== "object") return;
+      if (node.type?.name === "BiliVideoCard") template ||= node;
+      if (hasClass(node, "load-more-anchor") && Array.isArray(node.children)) {
+        for (const ch of node.children) if (isSkeleton(ch?.props) && ch.type && typeof ch.type === "object") floorTypes.add(ch.type);
+      }
+      if (Array.isArray(node.children)) node.children.forEach(discover);
+    };
+    const visit = (node) => {
+      if (Array.isArray(node)) {
+        discover(node);
+        return node.map(visit).filter((x) => x !== null);
+      }
+      if (!node || typeof node !== "object" || !node.__v_isVNode) return node;
+      const p = node.props;
+      if (p?.info?.isFloor) floorTypes.add(node.type);
+      if (isSkeleton(p) && template && floorTypes.has(node.type)) {
+        return {
+          ...template,
+          key: node.key,
+          props: { skeleton: true, animation: p.animation },
+          scopeId: node.scopeId,
+          slotScopeIds: node.slotScopeIds,
+          ref: null,
+          el: null,
+          component: null,
+          children: null,
+          dynamicChildren: null,
+          patchFlag: -2
+        };
+      }
+      let out = node;
+      if (p?.info?.isFloor && Array.isArray(p.info.list)) {
+        const list = p.info.list.filter((item) => !blocked(item));
+        if (!list.length) return null;
+        if (list.length !== p.info.list.length) out = { ...node, props: { ...p, info: {
+          ...p.info,
+          list,
+          displayItem: list.includes(p.info.displayItem) ? p.info.displayItem : list[0]
+        } }, dynamicChildren: null, patchFlag: -2 };
+      } else if (p?.info && !isSkeleton(p) && ["FeedCard", "BiliVideoCard", "BiliLiveCard"].includes(node.type?.name) && blocked(p.info)) return null;
+      if (Array.isArray(out.children)) {
+        const children2 = visit(out.children);
+        if (hasClass(out, "feed-card") && children2.length === 0) return null;
+        out = cloneChildren(out, children2);
+      } else if (out.children && typeof out.children === "object") {
+        const slots = { ...out.children };
+        for (const key of Object.keys(slots)) if (typeof slots[key] === "function") {
+          const original = slots[key];
+          const wrapped = (...args) => visit(original(...args));
+          Object.assign(wrapped, original);
+          slots[key] = wrapped;
+        }
+        slots._ = 2;
+        delete slots.$stable;
+        out = cloneChildren(out, slots);
+      }
+      return out;
+    };
+    discover(tree);
+    return visit(tree);
+  }
+  function attach(app) {
+    let videoTemplate;
+    const instances = [];
+    const seen = /* @__PURE__ */ new Set();
+    const walk = (node) => {
+      if (!node || typeof node !== "object" || seen.has(node)) return;
+      seen.add(node);
+      if (node.type?.name === "BiliVideoCard") videoTemplate ||= node;
+      if (node.component) {
+        if (NAMES.has(node.component.type?.__name)) instances.push(node.component);
+        walk(node.component.subTree);
+      }
+      if (Array.isArray(node.children)) node.children.forEach(walk);
+    };
+    walk(app?._container?._vnode);
+    for (const instance of instances) {
+      if (adapters.has(instance) || typeof instance.render !== "function" || !videoTemplate) continue;
+      const original = instance.render;
+      instance.render = function(...args) {
+        const tree = original.apply(this, args);
+        try {
+          return adaptHomeRender(tree, videoTemplate);
+        } catch (e) {
+          logErr("首页渲染适配", e);
+          return tree;
+        }
+      };
+      adapters.add(instance);
+      instance.proxy?.$forceUpdate?.();
+    }
+  }
+  function refreshHomeGrid() {
+    for (const instance of adapters) {
+      if (instance.isUnmounted) adapters.delete(instance);
+      else instance.proxy?.$forceUpdate?.();
+    }
+  }
+  function installHomeGrid() {
+    if (location.hostname !== "www.bilibili.com" || location.pathname !== "/") return;
+    const watched = /* @__PURE__ */ new WeakSet();
+    const inspect = () => {
+      for (const root of document.querySelectorAll("#app, #i_cecream")) {
+        if (watched.has(root)) continue;
+        watched.add(root);
+        const r = root;
+        if (r.__vue_app__) {
+          attach(r.__vue_app__);
+          continue;
+        }
+        const d = Object.getOwnPropertyDescriptor(r, "__vue_app__");
+        if (d && (!d.configurable || d.get || d.set)) continue;
+        let app;
+        Object.defineProperty(r, "__vue_app__", {
+          configurable: true,
+          enumerable: true,
+          get: () => app,
+          set: (value) => {
+            app = value;
+            try {
+              attach(value);
+            } catch (e) {
+              logErr("首页组件发现", e);
+            }
+          }
+        });
+      }
+    };
+    inspect();
+    const observer = new MutationObserver(inspect);
+    observer.observe(document, { childList: true, subtree: true });
+    setTimeout(() => observer.disconnect(), 15e3);
+  }
+
+  // src/events.ts
+  var handler = () => {
+  };
+  function setRulesChangedHandler(fn) {
+    handler = fn;
+  }
+  function emitRulesChanged() {
+    handler();
+  }
+
+  // src/subscriptions/refresh.ts
+  function metaGet(meta, key) {
+    if (!meta) return void 0;
+    if (meta[key] != null) return meta[key];
+    const lk = key.toLowerCase();
+    for (const k in meta) if (k.toLowerCase() === lk) return meta[k];
+    return void 0;
+  }
+  function cmpVer(a, b) {
+    const pa = String(a).split(".").map((n) => parseInt(n, 10) || 0);
+    const pb = String(b).split(".").map((n) => parseInt(n, 10) || 0);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const d = (pa[i] || 0) - (pb[i] || 0);
+      if (d) return d < 0 ? -1 : 1;
+    }
+    return 0;
+  }
+  var DAY_MS = 24 * 36e5;
+  function parseExpires(s) {
+    const m = String(s ?? "").trim().match(/^(\d+)\s*([hd])?/i);
+    if (!m) return DAY_MS;
+    const n = Math.max(1, parseInt(m[1], 10) || 1);
+    return n * ((m[2] || "d").toLowerCase() === "h" ? 36e5 : DAY_MS);
+  }
+  var SUB_MAX_LEN = 2 * 1024 * 1024;
+  function fetchSubText(url, cb) {
+    const sent = gmRequest({
+      method: "GET",
+      url,
+      timeout: 15e3,
+      onload: (r) => {
+        if (!(r.status >= 200 && r.status < 300) || !r.responseText) return cb(null, "HTTP " + r.status);
+        if (r.responseText.length > SUB_MAX_LEN) return cb(null, "订阅内容过大（>2MB）");
+        cb(r.responseText, null);
+      },
+      onerror: () => cb(null, "网络错误"),
+      ontimeout: () => cb(null, "超时")
+    });
+    if (!sent) cb(null, "无 GM_xmlhttpRequest");
+  }
+  function syncSubscription(url, cb) {
+    fetchSubText(url, (text2, err) => {
+      const store = loadSubStore();
+      const finish = (patch, ok) => {
+        const prev = store[url] || {};
+        if (ok) {
+          store[url] = patch;
+        } else if (prev.ok && prev.rules) {
+          store[url] = Object.assign(prev, { error: patch.error, lastError: Date.now() });
+        } else {
+          store[url] = Object.assign(prev, patch);
+        }
+        saveSubStore(store);
+        cb?.(ok);
+      };
+      if (err || !text2) return finish({ lastSync: Date.now(), ok: false, error: err || "空内容" }, false);
+      try {
+        const { meta, rules } = parseSubscription(text2);
+        const count = SUB_DIMS.reduce((n, d) => n + (rules[d] && rules[d].length || 0), 0);
+        finish({ meta, rules, lastSync: Date.now(), ok: true, count, error: null }, true);
+        const minV = metaGet(meta, "minScriptVersion");
+        if (minV && cmpVer(VERSION, minV) < 0) toast(`订阅「${metaGet(meta, "title") || url}」建议脚本升级到 ≥ ${minV}（部分规则可能未识别）`);
+      } catch (e) {
+        finish({ lastSync: Date.now(), ok: false, error: "解析失败" }, false);
+      }
+    });
+  }
+  function refreshSubscriptions(force, done) {
+    const store = loadSubStore();
+    const urls = new Set((CONFIG.subscriptions || []).map((s) => s && s.url).filter(Boolean));
+    let pruned = false;
+    for (const k of Object.keys(store)) {
+      if (!urls.has(k)) {
+        delete store[k];
+        pruned = true;
+      }
+    }
+    if (pruned) saveSubStore(store);
+    const due = (CONFIG.subscriptions || []).filter((s) => {
+      if (!s || !s.enabled || !s.url) return false;
+      if (force) return true;
+      const e = store[s.url];
+      if (!e || !e.ok) return true;
+      return Date.now() - (e.lastSync || 0) >= parseExpires(metaGet(e.meta, "expires"));
+    });
+    if (!due.length) return done?.(0);
+    let pending2 = due.length;
+    let changed = 0;
+    due.forEach(
+      (s) => syncSubscription(s.url, (ok) => {
+        if (ok) changed++;
+        if (--pending2 === 0) {
+          if (changed) emitRulesChanged();
+          done?.(changed);
+        }
+      })
+    );
   }
 
   // src/hotsearch.ts
@@ -2273,165 +3662,10 @@
     }
   }
 
-  // src/api.ts
-  var VIEW_CACHE_MAX = 800;
-  var TAG_CACHE_MAX = 1200;
-  var CARD_CACHE_MAX = 800;
-  var riskGuard = {
-    until: 0,
-    strikes: 0,
-    blocked() {
-      return Date.now() < this.until;
-    },
-    remaining() {
-      return Math.max(0, this.until - Date.now());
-    },
-    // 任何联网响应都喂进来：风控码→升级退避；正常码→冷却期过后清零。
-    note(code) {
-      if (code == null || !RISK_CODES.has(code)) {
-        if (code === 0 && this.strikes && !this.blocked()) this.strikes = 0;
-        return;
-      }
-      const wasBlocked = this.blocked();
-      this.strikes = Math.min(this.strikes + 1, 6);
-      const backoff = Math.min(6e4, 2e3 * 2 ** (this.strikes - 1));
-      this.until = Date.now() + backoff;
-      if (!wasBlocked) {
-        logErr("风控熔断", `code ${code}，暂停联网 ${Math.round(backoff / 1e3)}s`);
-        toast(`⚠️ 触发 B 站风控(code ${code})，已暂停联网 ${Math.round(backoff / 1e3)} 秒以保护账号`, "error");
-      }
-    }
-  };
-  var API = {
-    view: /* @__PURE__ */ new Map(),
-    tag: /* @__PURE__ */ new Map(),
-    card: /* @__PURE__ */ new Map(),
-    queue: [],
-    active: 0,
-    waiting: false,
-    CONCURRENCY: 3,
-    DELAY: 120
-  };
-  function apiPump() {
-    if (riskGuard.blocked()) {
-      if (!API.waiting) {
-        API.waiting = true;
-        setTimeout(() => {
-          API.waiting = false;
-          apiPump();
-        }, riskGuard.remaining() + 50);
-      }
-      return;
-    }
-    while (API.active < API.CONCURRENCY && API.queue.length) {
-      const task = API.queue.shift();
-      API.active++;
-      task(() => {
-        setTimeout(() => {
-          API.active--;
-          apiPump();
-        }, API.DELAY);
-      });
-    }
-  }
-  function apiEnqueue(task) {
-    API.queue.push(task);
-    apiPump();
-  }
-  function gmGet(url, cb) {
-    const sent = gmRequest({
-      method: "GET",
-      url,
-      withCredentials: true,
-      timeout: 12e3,
-      onload: (r) => {
-        try {
-          const j = JSON.parse(r.responseText);
-          riskGuard.note(j && j.code);
-          cb(j);
-        } catch (e) {
-          cb(null);
-        }
-      },
-      onerror: () => cb(null),
-      ontimeout: () => cb(null)
-    });
-    if (!sent) cb(null);
-  }
-  var RETRY_AFTER_MS = 3e4;
-  var COOLDOWN_MAX = 2e3;
-  var cooldown = /* @__PURE__ */ new Map();
-  function inCooldown(k) {
-    const until = cooldown.get(k);
-    if (until === void 0) return false;
-    if (Date.now() < until) return true;
-    cooldown.delete(k);
-    return false;
-  }
-  var inflight = /* @__PURE__ */ new Map();
-  function cachedGet(cache, cap, ns, key, url, pick, cb) {
-    if (!key) return cb(null);
-    if (cache.has(key)) return cb(cache.get(key));
-    if (inCooldown(ns + key)) return cb(null);
-    const flightKey = ns + key;
-    const waiting = inflight.get(flightKey);
-    if (waiting) {
-      waiting.push(cb);
-      return;
-    }
-    inflight.set(flightKey, [cb]);
-    const settle = (d) => {
-      const cbs = inflight.get(flightKey) || [];
-      inflight.delete(flightKey);
-      for (const f of cbs) f(d);
-    };
-    apiEnqueue((done) => {
-      gmGet(url, (j) => {
-        const code = j && typeof j.code === "number" ? j.code : null;
-        if (code === null || RISK_CODES.has(code)) {
-          capMapSet(cooldown, ns + key, Date.now() + RETRY_AFTER_MS, COOLDOWN_MAX);
-          settle(null);
-        } else {
-          const d = code === 0 ? pick(j) : null;
-          capMapSet(cache, key, d, cap);
-          settle(d);
-        }
-        done();
-      });
-    });
-  }
-  function fetchView(bvid, cb) {
-    cachedGet(API.view, VIEW_CACHE_MAX, "v:", bvid, "https://api.bilibili.com/x/web-interface/view?bvid=" + encodeURIComponent(bvid), (j) => j.data, (d) => {
-      if (d && d.owner && d.owner.mid && d.owner.name && CONFIG.uidNames[String(d.owner.mid)] === void 0) {
-        setUidName(d.owner.mid, d.owner.name);
-        scheduleStatsSave();
-      }
-      cb(d);
-    });
-  }
-  function fetchTags(bvid, cb) {
-    cachedGet(
-      API.tag,
-      TAG_CACHE_MAX,
-      "t:",
-      bvid,
-      "https://api.bilibili.com/x/web-interface/view/detail/tag?bvid=" + encodeURIComponent(bvid),
-      (j) => Array.isArray(j.data) ? j.data.map((x) => x.tag_name).filter(Boolean) : null,
-      cb
-    );
-  }
-  function fetchCard(mid, cb) {
-    cachedGet(API.card, CARD_CACHE_MAX, "c:", mid, "https://api.bilibili.com/x/web-interface/card?mid=" + encodeURIComponent(mid), (j) => j.data, cb);
-  }
-  function cachedUid(bvid) {
-    const d = bvid && API.view.get(bvid);
-    return d && d.owner && d.owner.mid ? String(d.owner.mid) : "";
-  }
-
   // src/rules.ts
-  function addEntries(entries) {
+  function addEntries(entries2) {
     const byArr = /* @__PURE__ */ new Map();
-    for (const e of entries) {
+    for (const e of entries2) {
       const v = (e.value ? String(e.value) : "").trim();
       if (!v) continue;
       const list = byArr.get(e.arr);
@@ -2446,9 +3680,9 @@
     }
     return n;
   }
-  function removeEntries(entries) {
+  function removeEntries(entries2) {
     const byArr = /* @__PURE__ */ new Map();
-    for (const e of entries) {
+    for (const e of entries2) {
       let set = byArr.get(e.arr);
       if (!set) byArr.set(e.arr, set = /* @__PURE__ */ new Set());
       set.add(String(e.value));
@@ -2511,7 +3745,37 @@
   }
 
   // src/dom.ts
-  var countedEls = /* @__PURE__ */ new WeakSet();
+  var countedEls = /* @__PURE__ */ new WeakMap();
+  var recognizedCards = /* @__PURE__ */ new WeakSet();
+  var recognizedCount = 0;
+  var pendingCards = /* @__PURE__ */ new WeakMap();
+  var waitingVisuals = /* @__PURE__ */ new WeakMap();
+  var domBatch = [];
+  var batchQueued = false;
+  function queueVerdict(result, apply, info) {
+    domBatch.push({ result, apply, info });
+    if (batchQueued) return;
+    batchQueued = true;
+    queueMicrotask(() => {
+      batchQueued = false;
+      const batch = domBatch;
+      domBatch = [];
+      Promise.all(batch.map((job) => job.result.catch(() => ({ reason: null, info: job.info })))).then((results) => {
+        results.forEach((v, index) => batch[index].apply(v.reason, v.info));
+      });
+    });
+  }
+  function waitForVerdict(card) {
+    if (!waitingVisuals.has(card)) waitingVisuals.set(card, { value: card.style.getPropertyValue("visibility"), priority: card.style.getPropertyPriority("visibility") });
+    card.style.setProperty("visibility", "hidden", "important");
+  }
+  function endWait(card) {
+    const saved = waitingVisuals.get(card);
+    if (!saved) return;
+    waitingVisuals.delete(card);
+    if (saved.value) card.style.setProperty("visibility", saved.value, saved.priority);
+    else card.style.removeProperty("visibility");
+  }
   function clearVisual(card) {
     showEl(card);
     card.classList.remove("bfb-review");
@@ -2603,71 +3867,97 @@
       fixParityGutter(cell.parentElement);
     }
     card.setAttribute(ATTR_BLOCKED, "1");
-    if (countedEls.has(card)) return;
-    countedEls.add(card);
+    const key = info.bvid || info.uid + ":" + info.title;
+    if (countedEls.get(card) === key) return;
+    countedEls.set(card, key);
     recordBlock(reason, info, "DOM");
   }
-  var processCard = safe("processCard", function(card) {
+  var processCard = safe("processCard", function(card, fresh = false) {
     if (!CONFIG.enabled) return;
-    const info = extractCardInfo(card, M.needUid);
-    if (!info.title && !info.up && !info.isLive) return;
-    card.setAttribute(PROCESSED, "1");
-    cacheCardInfo(card, info);
-    const hit = matchRule(info);
-    if (!hit) log(() => `放行✅ | 标题:${info.title || "(无)"} | UP:${info.up || "(无)"} | 标签:${info.partition || "(无)"}`);
-    if (hit) {
-      blockVideo(card, hit, info);
+    if (isInitialStatePending(card)) return;
+    let info = extractCardInfo(card, M.needUid);
+    if (!info.title && !info.up && !info.isLive) {
+      if (card.hasAttribute(PROCESSED) || pendingCards.has(card)) {
+        pendingCards.delete(card);
+        endWait(card);
+        clearVisual(card);
+        card.removeAttribute(PROCESSED);
+        card.removeAttribute(ATTR_API);
+        countedEls.delete(card);
+        cacheCardInfo(card, info);
+      }
       return;
     }
-    if (info.bvid && apiRulesActive()) evaluateApi(card, info);
-  });
-  function evaluateApi(card, info) {
-    if (card.getAttribute(ATTR_API)) return;
-    card.setAttribute(ATTR_API, "1");
-    const need = apiNeeds();
-    let view = null;
-    let tags = null;
-    let cardData = null;
-    let pending = 1;
-    const finish = () => {
-      if (pending > 0) return;
-      if (!CONFIG.enabled || isWhitelisted(info)) return;
-      const hit = matchApi(info, view, tags, cardData);
-      if (hit) blockVideo(card, hit, info);
-      else log(`API放行 | ${info.title || ""}`);
-    };
-    const afterView = () => {
-      if (need.needCard) {
-        const mid = info.uid || view && view.owner && view.owner.mid;
-        if (mid) {
-          pending++;
-          fetchCard(mid, (c) => {
-            cardData = c;
-            pending--;
-            finish();
-          });
-        }
+    if (card.closest(SWIPE_BANNER)) return;
+    if (!recognizedCards.has(card)) {
+      recognizedCards.add(card);
+      health.cardsSeen = Math.max(health.cardsSeen, ++recognizedCount);
+    }
+    const displayed = !fresh && card.hasAttribute(PROCESSED);
+    const previous = cachedCardInfo(card);
+    if (previous && previous.bvid === info.bvid && previous.title === info.title) {
+      info = { ...info, uid: info.uid || previous.uid, partition: info.partition || previous.partition, likes: info.likes ?? previous.likes, views: info.views ?? previous.views };
+    }
+    card.setAttribute(PROCESSED, "1");
+    cacheCardInfo(card, info);
+    const token = {};
+    pendingCards.set(card, token);
+    const version = ruleVersion;
+    const apply = (reason, complete) => {
+      if (pendingCards.get(card) !== token || version !== ruleVersion) return;
+      pendingCards.delete(card);
+      if (!card.isConnected) {
+        endWait(card);
+        clearVisual(card);
+        card.removeAttribute(PROCESSED);
+        card.removeAttribute(ATTR_API);
+        return;
       }
-      finish();
+      cacheCardInfo(card, complete);
+      if (reason && CONFIG.enabled) {
+        if (CONFIG.reviewMode) clearVisual(card);
+        else {
+          card.classList.remove("bfb-review");
+          card.querySelector(":scope > .bfb-tag")?.remove();
+        }
+        blockVideo(card, reason, complete);
+      } else clearVisual(card);
+      endWait(card);
     };
-    if (need.needView) {
-      pending++;
-      fetchView(info.bvid, (v) => {
-        view = v;
-        pending--;
-        afterView();
-      });
+    const known = dataVerdict(info.bvid, info.title, info.uid) || immediateVerdict(info);
+    if (known) {
+      if (!displayed && !CONFIG.reviewMode) waitForVerdict(card);
+      queueVerdict(Promise.resolve(known), apply, info);
+      return;
     }
-    if (need.needTag) {
-      pending++;
-      fetchTags(info.bvid, (t) => {
-        tags = t;
-        pending--;
-        finish();
-      });
+    if (!displayed && !CONFIG.reviewMode) waitForVerdict(card);
+    card.setAttribute(ATTR_API, "1");
+    queueVerdict(evaluateVideo(info), apply, info);
+  });
+  function scanAddedNode(node) {
+    if (!CONFIG.enabled || node.nodeType !== 1) return;
+    const el = node;
+    if (el.matches(VIDEO_CARD_SELECTOR) && !el.hasAttribute(PROCESSED)) processCard(el);
+    for (const card of el.querySelectorAll(UNPROCESSED_CARD_SELECTOR)) processCard(card);
+  }
+  function inspectChangedCard(node, seen) {
+    if (!CONFIG.enabled) return;
+    const el = node.nodeType === 1 ? node : node.parentElement;
+    const card = el?.closest(VIDEO_CARD_SELECTOR);
+    if (!card || card.closest("#bfb-panel, .bfb-tag")) return;
+    if (seen?.has(card)) return;
+    seen?.add(card);
+    const old = cachedCardInfo(card);
+    if (!old) {
+      processCard(card);
+      return;
     }
-    pending--;
-    finish();
+    const info = extractCardInfo(card, M.needUid);
+    if (!info.title && !info.up && !info.isLive) {
+      processCard(card, true);
+      return;
+    }
+    if (info.title && (info.bvid !== old.bvid || info.title !== old.title || info.up !== old.up)) processCard(card, true);
   }
   function queryAllRoots(selector) {
     const out = Array.from(document.querySelectorAll(selector));
@@ -2696,10 +3986,14 @@
   }
   function rescanAfterRuleChange() {
     timed("rules.rebuild", rebuildRules);
+    refreshHomeGrid();
     queryAllRoots("[" + PROCESSED + "]").forEach((el) => {
-      el.removeAttribute(PROCESSED);
       el.removeAttribute(ATTR_API);
-      clearVisual(el);
+      pendingCards.delete(el);
+      if (!CONFIG.enabled) {
+        clearVisual(el);
+        endWait(el);
+      } else processCard(el);
     });
     scanAll();
     scanComments();
@@ -2741,11 +4035,15 @@
     const observer = new MutationObserver(
       safe("observer", (muts) => {
         let touched = false;
+        const changedCards = /* @__PURE__ */ new Set();
         for (const m of muts) {
+          inspectChangedCard(m.target, changedCards);
+          if (m.type === "attributes" || m.type === "characterData") touched = true;
           if (!m.addedNodes || !m.addedNodes.length) continue;
           touched = true;
           for (const n of m.addedNodes) {
             const el = n;
+            scanAddedNode(n);
             if (n.nodeType === 1 && el.shadowRoot && el.id !== "bfb-overlay-host") addShadowRoot(el.shadowRoot);
           }
         }
@@ -2753,12 +4051,13 @@
         scheduler.request();
       })
     );
-    observer.observe(document, { childList: true, subtree: true });
+    const observeOptions = { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["href", "title", "data-mid", "data-up-mid"] };
+    observer.observe(document, observeOptions);
     const cmtObserver = new MutationObserver(safe("cmtObserver", () => scheduleCommentScan()));
     setShadowRootHandler((root) => {
       const target = root.host && isCommentTag(root.host.tagName) ? cmtObserver : observer;
       try {
-        target.observe(root, { childList: true, subtree: true });
+        target.observe(root, target === observer ? observeOptions : { childList: true, subtree: true });
       } catch (e) {
       }
     });
@@ -2776,7 +4075,7 @@
     fetchView(bvid, (d) => {
       if (d && d.owner) cb(String(d.owner.mid), d.owner.name || "");
       else cb("", "");
-    });
+    }, void 0, true);
   }
   var REL_ERR = {
     "-101": "未登录或登录已过期",
@@ -2962,7 +4261,7 @@
           toast(targets.length > 1 ? `联合投稿：已拉黑 ${ok}/${r.total} 位作者${r.failed.length ? `（失败 ${r.failed.length}）` : ""}` : `已拉黑：${targets[0].name || targets[0].uid}`);
           cb?.(ok > 0);
         });
-      });
+      }, void 0, true);
       return;
     }
     if (uid) {
@@ -3278,8 +4577,12 @@
     const t = s && s.toString().trim() || "";
     return t.length <= 30 ? t : "";
   }
+  function shouldUseNativeContextMenu(shiftKey, inverted) {
+    return shiftKey !== inverted;
+  }
   function onContextMenu(e) {
     closeCtxMenu();
+    if (shouldUseNativeContextMenu(e.shiftKey, CONFIG.invertShiftRightClick)) return;
     if (!CONFIG.enabled || !CONFIG.rightClickBlock) return;
     if (CONFIG.comment.enabled) {
       const cmtHost = findCommentHost(e);
@@ -3541,7 +4844,8 @@
     .bfb-tag{position:absolute;top:6px;left:6px;z-index:9;display:flex;align-items:center;gap:6px;background:rgba(251,114,153,.95);color:#fff;border-radius:8px;padding:3px 6px;font-size:11px;font-family:system-ui,Arial;box-shadow:0 2px 6px rgba(0,0,0,.25)}
     .bfb-tag .rs{white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis}
     .bfb-tag button{border:none;border-radius:6px;background:#fff;color:#1b7a3d;font-size:11px;padding:2px 6px;cursor:pointer;white-space:nowrap}
-    #bfb-badge{position:fixed;right:18px;bottom:18px;z-index:99999;background:#fb7299;color:#fff;border-radius:24px;padding:8px 14px;font-size:13px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.2);font-family:system-ui,Arial;user-select:none}
+    #bfb-badge{position:fixed;right:18px;bottom:18px;z-index:99999;background:#fb7299;color:#fff;border-radius:24px;padding:8px 14px;font-size:13px;cursor:grab;box-shadow:0 4px 14px rgba(0,0,0,.2);font-family:system-ui,Arial;user-select:none;touch-action:none}
+    #bfb-badge.dragging{cursor:grabbing;transition:none}
     #bfb-badge.off{background:#999}
     #bfb-badge.warn{background:#e67e22}
     #bfb-ctxmenu{position:fixed;z-index:100002;background:#fff;border:1px solid #ffd5e2;border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.22);overflow:hidden;min-width:210px;font-family:system-ui,Arial}
@@ -3608,6 +4912,16 @@
     #bfb-panel input[type=number]{width:80px;padding:4px 6px;border:1px solid #ddd;border-radius:6px}
     #bfb-panel .hint{font-size:11px;color:#6e6e6e;margin-top:7px;line-height:1.7}
     #bfb-panel .toolbar{display:flex;gap:8px;flex-wrap:wrap}
+    #bfb-panel .bfb-webdav-fields{display:grid;gap:6px}
+    #bfb-panel .bfb-webdav-fields input{width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid #ddd;border-radius:8px;font-size:12px;background:#fff;color:#222}
+    #bfb-panel .bfb-webdav-fields input:focus{outline:none;border-color:#fb7299;box-shadow:0 0 0 2px rgba(251,114,153,.18)}
+    #bfb-panel .bfb-webdav-fields label{margin:0;font-size:12px}
+    #bfb-panel .bfb-webdav-fields input{display:block;margin-top:5px}
+    #bfb-panel #bfb-wd-path,#bfb-panel #bfb-wd-found{overflow-wrap:anywhere}
+    #bfb-panel #bfb-wd-devices[hidden]{display:none}
+    #bfb-panel #bfb-wd-devices{margin-top:10px}
+    #bfb-panel #bfb-wd-device{display:block;margin-top:5px;width:100%;padding:7px;border:1px solid #ddd;border-radius:8px;background:#fff;color:#222}
+    #bfb-panel .bfb-webdav-fields input:-webkit-autofill{-webkit-text-fill-color:#222;box-shadow:0 0 0 1000px #fff inset}
     #bfb-panel button.act{background:#fb7299;color:#fff;border:none;border-radius:8px;padding:8px 12px;cursor:pointer;font-size:13px}
     #bfb-panel button.ghost{background:#f3f3f3;color:#333}
     #bfb-panel .switch{display:flex;align-items:center;gap:8px;font-size:13px;color:#333;font-weight:600;margin-top:9px;line-height:1.5}
@@ -3697,6 +5011,9 @@
       .bfb-modal-input{background:#26262b;color:#e6e6e9;border-color:#44444c}
       #bfb-panel .empty{color:#9a9aa2}
       #bfb-panel .addrow input,#bfb-panel input[type=number]{background:#26262b;border-color:#44444c;color:#e6e6e9}
+      #bfb-panel .bfb-webdav-fields input{background:#26262b;border-color:#44444c;color:#e6e6e9}
+      #bfb-panel #bfb-wd-device{background:#26262b;border-color:#44444c;color:#e6e6e9}
+      #bfb-panel .bfb-webdav-fields input:-webkit-autofill{-webkit-text-fill-color:#e6e6e9;box-shadow:0 0 0 1000px #26262b inset}
       #bfb-panel .chip-search input{background:#232328;border-color:#3a3a42;color:#e6e6e9}
       #bfb-panel .chip-search input:focus{background:#26262b}
       #bfb-panel button.ghost{background:#2e2e34}
@@ -3925,9 +5242,9 @@
         manage = false;
         return;
       }
-      const mk = (text, fn, primary) => {
+      const mk = (text2, fn, primary) => {
         const b = el("button", "chip-act" + (primary ? " primary" : ""));
-        b.textContent = text;
+        b.textContent = text2;
         b.onclick = fn;
         bar.appendChild(b);
       };
@@ -4158,6 +5475,7 @@
       <div class="switch"><input type="checkbox" id="bfb-enabled"> 启用拦截</div>
       <div class="switch"><input type="checkbox" id="bfb-review"> 🔍 审查模式（不隐藏，仅标记被拦视频并提供就地放行，便于核对）</div>
       <div class="switch"><input type="checkbox" id="bfb-rclick"> 右键卡片弹出菜单（屏蔽、拉黑、加入白名单）</div>
+      <div class="switch"><input type="checkbox" id="bfb-invert-shift-rclick"> 反转 Shift+右键（普通右键显示原生菜单，Shift+右键显示插件菜单）</div>
       <div class="switch"><input type="checkbox" id="bfb-hoverbtn"> 悬停卡片显示快捷「拉黑 / 不看这个」按钮</div>
       <div class="switch"><input type="checkbox" id="bfb-collab"> 联合投稿一并拉黑合作者</div>
       <div class="switch"><input type="checkbox" id="bfb-fuzzy"> 反绕过模糊匹配（「原 神」「原.神」同样拦截；隐形字符始终拦截）</div>
@@ -4173,6 +5491,7 @@
       });
       bindControl(sw, "bfb-review", CONFIG, "reviewMode", { after: rescanAfterRuleChange });
       bindControl(sw, "bfb-rclick", CONFIG, "rightClickBlock");
+      bindControl(sw, "bfb-invert-shift-rclick", CONFIG, "invertShiftRightClick");
       bindControl(sw, "bfb-hoverbtn", CONFIG, "cardHoverBtn", { after: hideHoverBtn });
       bindControl(sw, "bfb-collab", CONFIG, "blacklistCollab");
       bindControl(sw, "bfb-fuzzy", CONFIG, "fuzzyMatch", { after: rescanAfterRuleChange });
@@ -4183,6 +5502,24 @@
           rescanAfterRuleChange();
         }
       });
+      const notices = document.createElement("div");
+      notices.className = "sec";
+      notices.innerHTML = `
+      <label>通知提示</label>
+      <div class="switch"><input type="checkbox" id="bfb-notifications"> 显示页面通知（操作结果、启动汇总等）</div>
+      <div id="bfb-notification-options">
+        <div class="switch"><input type="checkbox" id="bfb-risk-notifications"> 触发 B 站风控时提醒</div>
+      </div>
+      <div class="hint">关闭风控提醒只隐藏弹出的提示，联网熔断、暂停和自动退避仍会照常保护账号。拉黑、清空规则、恢复备份等危险操作的确认框不受此开关影响。</div>`;
+      host.appendChild(notices);
+      const noticeOptions = notices.querySelector("#bfb-notification-options");
+      const syncNoticeOptions = () => {
+        noticeOptions.style.opacity = CONFIG.showNotifications ? "1" : ".4";
+        noticeOptions.style.pointerEvents = CONFIG.showNotifications ? "auto" : "none";
+      };
+      bindControl(notices, "bfb-notifications", CONFIG, "showNotifications", { after: syncNoticeOptions });
+      bindControl(notices, "bfb-risk-notifications", CONFIG, "showRiskNotifications");
+      syncNoticeOptions();
       const ct = document.createElement("div");
       ct.className = "sec";
       ct.innerHTML = `
@@ -4253,7 +5590,7 @@
           <td><input type="number" id="bfb-dmax" min="0" step="1"><span class="u">秒</span></td>
         </tr>
       </table>
-      <div class="hint">留空或 0 = 该项不启用。三项<b>各自独立</b>，任一命中即屏蔽；同一行两端都填则表示「区间之外的屏蔽」。<br>⚠ <b>点赞数</b>需要额外说明：B 站的卡片上并不显示点赞数。信息流接口<b>有时</b>会带这个字段、有时不带（各接口不一，也会变），带的时候刷新后即可生效；<b>不带的时候这两条规则在信息流上是不生效的</b>。要让它们稳定生效，请打开下方的<b>「精确过滤」</b>——它会按需读取视频详情把点赞数补齐，对所有页面、包括已经显示出来的卡片都有效。当前接口到底给没给，看「工具 → 🩺 运行自检」里的「其中带点赞数 N」。</div>`;
+      <div class="hint">留空或 0 = 该项不启用。三项<b>各自独立</b>，任一命中即屏蔽；同一行两端都填则表示「区间之外的屏蔽」。<br>点赞数优先使用页面已有响应。开启下方「精确过滤」也可使用本地元数据缓存；缺失字段默认放行，不逐视频联网、不在卡片显示后迟到隐藏。当前接口是否带点赞数，可在「工具 → 运行自检」查看。</div>`;
       host.appendChild(num);
       const numOpts = { number: true, after: rescanAfterRuleChange };
       bindControl(num, "bfb-minviews", CONFIG.block, "minViews", numOpts);
@@ -4283,9 +5620,11 @@
       api.innerHTML = `
       <label>🛰 精确过滤</label>
       <div class="switch"><input type="checkbox" id="bfb-api"> <b>启用精确过滤</b></div>
-      <div class="hint">按需读取视频标签、UP 简介等数据来判断，命中时会略有延迟；不开启则完全不联网。</div>
+      <div class="hint">使用页面原本加载的标签、UP 简介、详情及本地缓存，在显示前判定。默认不额外访问 B 站，缺失字段放行；缓存最长保留 7 天（简介 1 天），不随规则备份上传。</div>
       <div id="bfb-api-body" style="margin-top:6px">
         <div class="switch"><input type="checkbox" id="bfb-charging"> 屏蔽充电专属视频</div>
+        <div class="switch"><input type="checkbox" id="bfb-metadata-network"> 允许补充联网取数（默认关闭）</div>
+        <div class="hint">仅在缺少字段时取数：串行、间隔至少 1 秒，最多 6 次/分钟、60 次/24 小时；到限或超时放行。可能增加风控风险。该授权不随配置导入或云端恢复开启；手动账号拉黑所需解析不受此开关影响。</div>
       </div>`;
       host.appendChild(api);
       const apiBody = q(api, "#bfb-api-body");
@@ -4300,6 +5639,7 @@
         }
       });
       bindControl(api, "bfb-charging", CONFIG, "hideCharging", { after: rescanAfterRuleChange });
+      bindControl(api, "bfb-metadata-network", CONFIG, "allowMetadataRequests", { after: rescanAfterRuleChange });
       syncApiBody();
     }
   };
@@ -4319,6 +5659,8 @@
         <div class="switch"><input type="checkbox" id="bfb-cmt-noface"> 隐藏 默认头像且非会员（疑似小号、水军）</div>
         <div class="switch"><input type="checkbox" id="bfb-cmt-bot"> 隐藏 AI 机器人发布的评论</div>
         <div class="switch"><input type="checkbox" id="bfb-cmt-callbot"> 隐藏 召唤 AI 的评论</div>
+        <div class="switch"><input type="checkbox" id="bfb-cmt-reply-blocked"> 隐藏 回复了评论用户黑名单中用户的评论</div>
+        <div class="hint">包含直接回复一级评论，以及“回复 @用户名 :正文”形式的楼中楼回复。</div>
         <div class="switch"><input type="checkbox" id="bfb-cmt-ad"> 隐藏 带货 / 导流广告评论</div>
         <div class="switch"><input type="checkbox" id="bfb-cmt-callonly"> 隐藏 只含 @他人 的空评论</div>
         <div class="switch"><input type="checkbox" id="bfb-cmt-emoji"> 隐藏 纯表情评论</div>
@@ -4344,6 +5686,7 @@
       bindControl(cmt, "bfb-cmt-noface", CONFIG.comment, "hideNoFace", { after: rescanAfterRuleChange });
       bindControl(cmt, "bfb-cmt-bot", CONFIG.comment, "hideBot", { after: rescanAfterRuleChange });
       bindControl(cmt, "bfb-cmt-callbot", CONFIG.comment, "hideCallBot", { after: rescanAfterRuleChange });
+      bindControl(cmt, "bfb-cmt-reply-blocked", CONFIG.comment, "hideRepliesToBlockedUsers", { after: rescanAfterRuleChange });
       bindControl(cmt, "bfb-cmt-ad", CONFIG.comment, "hideAd", { after: rescanAfterRuleChange });
       bindControl(cmt, "bfb-cmt-callonly", CONFIG.comment, "hideCallOnly", { after: rescanAfterRuleChange });
       bindControl(cmt, "bfb-cmt-emoji", CONFIG.comment, "hideEmojiOnly", { after: rescanAfterRuleChange });
@@ -4375,15 +5718,13 @@
 
   // src/presets.ts
   var PRESET_LIBRARY = [
-    { cat: "游戏黑水", name: "库洛系(鸣潮/库洛)", desc: "鸣潮 / 库洛 / 战双 等相关词", rules: { keywords: ["库洛", "库洛游戏", "呜哇", "鸣潮", "战双", "战双帕弥什", "漂泊者", "漂泊神游", "寄生神游", "寄生社区"] } },
     { cat: "引战", name: "引战话术", desc: "挑动对立的话术片段（已收敛正则、防误伤）", rules: { keywords: ["/接触wuwa后|大脑发生的异变/"] } },
     { cat: "引战", name: "引战标签", desc: "抹黑 / 拉踩类标签（需开「精确过滤」才匹配标签）", rules: { tags: ["/米哈一儿|一哭|二抄|三自爆/"] } },
     { cat: "标题党 / 营销", name: "标题党", desc: "震惊体 + 一口气看完", rules: { keywords: ["/(一口气|一次性|一天|分钟|分半|小时)(看完|带你看完|直接看完)/", "/震惊|竟然|万万没想到/"] } },
     { cat: "标题党 / 营销", name: "营销号UP名", desc: "常见营销号账号名", rules: { keywords: ["今日话题", "话题酱", "今日知乎", "大型纪录片"] } },
     { cat: "标题党 / 营销", name: "软传销", desc: "日入月入 / 为自己打工", rules: { keywords: ["/(日入|日赚|月入|月赚)\\d+/", "/(小时|内耗).+为自己打工/"] } },
     { cat: "其它", name: "MBTI", rules: { keywords: ["/MBTI|[IE][SN][TF][JP]|I人|E人/"] } },
-    { cat: "其它", name: "梗视频", rules: { keywords: ["科目三", "猫meme", "/是什么梗|梗百科|大型[纪记]录片/"] } },
-    { cat: "其它", name: "含日语标题", rules: { keywords: ["/[ぁ-ヶ]/"] } }
+    { cat: "其它", name: "梗视频", rules: { keywords: ["科目三", "猫meme", "/是什么梗|梗百科|大型[纪记]录片/"] } }
   ];
 
   // src/ui/panel/sections/presets.ts
@@ -4512,7 +5853,7 @@
         const blob = new Blob([exportConfig()], { type: "application/json" });
         const a = document.createElement("a");
         a.href = URL.createObjectURL(blob);
-        a.download = `biliHoyoFairy-rules-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.json`;
+        a.download = `${APP_NAME}-rules-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.json`;
         a.click();
         setTimeout(() => URL.revokeObjectURL(a.href), 2e3);
         toast("已导出规则配置文件");
@@ -4524,7 +5865,7 @@
           const blob = new Blob([exportSubscription(title)], { type: "application/json" });
           const a = document.createElement("a");
           a.href = URL.createObjectURL(blob);
-          a.download = `biliHoyoFairy-blocklist-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.json`;
+          a.download = `${APP_NAME}-blocklist-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.json`;
           a.click();
           setTimeout(() => URL.revokeObjectURL(a.href), 2e3);
           toast("已导出订阅名单文件，传到公开 URL 后即可被订阅", "success");
@@ -4628,6 +5969,625 @@
         });
       };
       render();
+    }
+  };
+
+  // src/json-span.ts
+  function jsonPropertySpan(raw, path) {
+    const space = (i) => {
+      while (/\s/.test(raw[i] || "") && i < raw.length) i++;
+      return i;
+    };
+    const stringEnd = (start) => {
+      let i = start + 1;
+      while (i < raw.length) {
+        if (raw[i] === "\\") i += 2;
+        else if (raw[i++] === '"') return i;
+      }
+      return raw.length;
+    };
+    const valueEnd = (start) => {
+      if (raw[start] === '"') return stringEnd(start);
+      let depth = 0;
+      let i = start;
+      if (raw[i] === "{" || raw[i] === "[") {
+        do {
+          const ch = raw[i];
+          if (ch === '"') {
+            i = stringEnd(i);
+            continue;
+          }
+          if (ch === "{" || ch === "[") depth++;
+          if (ch === "}" || ch === "]") depth--;
+          i++;
+        } while (i < raw.length && depth);
+      } else while (i < raw.length && !/[\s,}\]]/.test(raw[i])) i++;
+      return i;
+    };
+    const find = (start, level) => {
+      if (raw[space(start)] !== "{") return null;
+      let i = space(start) + 1;
+      let result = null;
+      while ((i = space(i)) < raw.length && raw[i] !== "}") {
+        if (raw[i] !== '"') return null;
+        const keyEnd = stringEnd(i);
+        const key = JSON.parse(raw.slice(i, keyEnd));
+        i = space(keyEnd);
+        if (raw[i] !== ":") return null;
+        const begin = space(i + 1);
+        const end = valueEnd(begin);
+        if (key === path[level]) result = level === path.length - 1 ? { start: begin, end } : find(begin, level + 1);
+        i = space(end);
+        if (raw[i] === ",") i++;
+        else break;
+      }
+      return result;
+    };
+    return path.length ? find(0, 0) : null;
+  }
+
+  // src/webdav-directory.ts
+  var DAV = "DAV:";
+  function httpUrl(raw) {
+    let url;
+    try {
+      url = new URL(raw.trim());
+    } catch {
+      throw new Error("WebDAV 地址格式不正确");
+    }
+    if (!["https:", "http:"].includes(url.protocol)) throw new Error("WebDAV 地址必须使用 http:// 或 https://");
+    if (url.username || url.password) throw new Error("请把用户名和密钥填在独立输入框，不要写进 URL");
+    if (url.search) throw new Error("请填写 WebDAV 目录地址，不要包含查询参数");
+    url.hash = "";
+    return url;
+  }
+  function normalizeWebDavRepositoryUrl(raw) {
+    if (!raw.trim()) throw new Error("请填写 WebDAV 仓库地址");
+    const url = httpUrl(raw);
+    if (/\.json\/?$/i.test(url.pathname)) throw new Error("请填写仓库目录地址，不是 JSON 文件地址");
+    if (!url.pathname.endsWith("/")) url.pathname += "/";
+    return url.href;
+  }
+  function repositoryChildUrl(root, names, collection = false) {
+    if (names.some((x) => !x || x === "." || x === ".." || /[/\\]/.test(x))) throw new Error("WebDAV 文件路径不正确");
+    if (!names.length) return normalizeWebDavRepositoryUrl(root);
+    return new URL(names.map(encodeURIComponent).join("/") + (collection ? "/" : ""), normalizeWebDavRepositoryUrl(root)).href;
+  }
+  function pathParts(url) {
+    try {
+      const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+      return parts.some((x) => x === "." || x === ".." || /[/\\\u0000-\u001f]/.test(x)) ? null : parts;
+    } catch {
+      return null;
+    }
+  }
+  function repositoryRelativePath(root, target) {
+    try {
+      const base = new URL(normalizeWebDavRepositoryUrl(root));
+      const url = httpUrl(target);
+      if (base.origin !== url.origin) return null;
+      const a = pathParts(base);
+      const b = pathParts(url);
+      if (!a || !b || a.some((x, i) => b[i] !== x) || b.length < a.length) return null;
+      return b.slice(a.length);
+    } catch {
+      return null;
+    }
+  }
+  function children(el, localName) {
+    return Array.from(el.childNodes).filter((x) => x.nodeType === 1 && x.namespaceURI === DAV && x.localName === localName);
+  }
+  function parseWebDavDirectory(raw, root, directory) {
+    if (!raw || raw.length > 2 * 1024 * 1024 || /<!DOCTYPE|<!ENTITY/i.test(raw)) throw new Error("WebDAV 目录响应无效或超过 2MB");
+    let doc;
+    try {
+      doc = new DOMParser().parseFromString(raw, "application/xml");
+    } catch {
+      throw new Error("服务器返回的不是有效 WebDAV XML");
+    }
+    if (doc.documentElement?.localName !== "multistatus" || doc.documentElement.namespaceURI !== DAV || doc.getElementsByTagName("parsererror").length) {
+      throw new Error("服务器返回的不是 WebDAV 目录，请检查仓库地址");
+    }
+    const parentParts = repositoryRelativePath(root, directory);
+    if (!parentParts) throw new Error("WebDAV 目录超出仓库范围");
+    const found = /* @__PURE__ */ new Map();
+    for (const response of Array.from(doc.getElementsByTagNameNS(DAV, "response"))) {
+      const href = children(response, "href")[0]?.textContent?.trim();
+      if (!href) continue;
+      const ownStatus = children(response, "status")[0]?.textContent || "";
+      if (ownStatus && !/\s2\d\d(?:\s|$)/.test(ownStatus)) continue;
+      const props = children(response, "propstat").filter((p) => /\s2\d\d(?:\s|$)/.test(children(p, "status")[0]?.textContent || ""));
+      if (!props.length) continue;
+      let url;
+      try {
+        url = new URL(href, directory);
+      } catch {
+        continue;
+      }
+      const relative = repositoryRelativePath(root, url.href);
+      if (!relative || relative.length < parentParts.length || relative.length > parentParts.length + 1 || parentParts.some((x, i) => relative[i] !== x)) continue;
+      const collection = props.some((p) => p.getElementsByTagNameNS(DAV, "collection").length > 0);
+      const canonical = repositoryChildUrl(root, relative, collection);
+      found.set(canonical, { url: canonical, name: relative[relative.length - 1] || "", collection });
+    }
+    return [...found.values()];
+  }
+
+  // src/webdav.ts
+  var EMPTY_SETTINGS = { url: "", username: "", password: "" };
+  var WEBDAV_BACKUP_MAX = 2 * 1024 * 1024;
+  var REQUEST_TIMEOUT = 3e4;
+  function str(v, max) {
+    return typeof v === "string" ? v.slice(0, max) : "";
+  }
+  function legacyRepository(parsed) {
+    const backup = str(parsed.url, 4096);
+    const pili = str(parsed.piliNaraUrl, 4096);
+    if (pili) {
+      const url = new URL(pili);
+      const at = url.pathname.toLowerCase().lastIndexOf("/pilinara/");
+      if (at >= 0) {
+        url.pathname = url.pathname.slice(0, at + 1);
+        url.hash = "";
+        const root = normalizeWebDavRepositoryUrl(url.href);
+        if (!backup || repositoryRelativePath(root, backup)) return root;
+      }
+    }
+    return backup ? normalizeWebDavRepositoryUrl(/\.json(?:[#?]|$)/i.test(backup) ? new URL(".", backup).href : backup) : "";
+  }
+  function loadWebDavSettings() {
+    try {
+      const raw = GM_getValue(WEBDAV_SETTINGS_KEY, null);
+      const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+      if (!parsed || typeof parsed !== "object") return { ...EMPTY_SETTINGS };
+      const url = parsed.schemaVersion === 2 ? parsed.url ? normalizeWebDavRepositoryUrl(str(parsed.url, 4096)) : "" : legacyRepository(parsed);
+      const oldFile = str(parsed.schemaVersion === 2 ? parsed.legacyBackupUrl : parsed.url, 4096);
+      return {
+        url,
+        ...oldFile && /\.json(?:[#?]|$)/i.test(oldFile) && repositoryRelativePath(url, oldFile) ? { legacyBackupUrl: oldFile } : {},
+        username: str(parsed.username, 512),
+        password: str(parsed.password, 1024)
+      };
+    } catch {
+      return { ...EMPTY_SETTINGS };
+    }
+  }
+  function saveWebDavSettings(input) {
+    const settings = {
+      url: input.url.trim() ? normalizeWebDavRepositoryUrl(input.url) : "",
+      username: str(input.username, 512),
+      password: str(input.password, 1024)
+    };
+    const oldFile = input.legacyBackupUrl || loadWebDavSettings().legacyBackupUrl;
+    const saved = { ...settings, ...oldFile && repositoryRelativePath(settings.url, oldFile) ? { legacyBackupUrl: oldFile } : {} };
+    GM_setValue(WEBDAV_SETTINGS_KEY, JSON.stringify({ schemaVersion: 2, ...saved }));
+    return saved;
+  }
+  function basicAuth(username, password) {
+    const bytes = new TextEncoder().encode(`${username}:${password}`);
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return "Basic " + btoa(binary);
+  }
+  function webDavRequest(settings, url, method, data, acceptedStatuses = [], extraHeaders = {}) {
+    return new Promise((resolve, reject) => {
+      if (!repositoryRelativePath(settings.url, url)) return reject(new Error("WebDAV 目标超出仓库范围"));
+      const headers = { Accept: "application/json", ...extraHeaders };
+      if (method === "PUT") headers["Content-Type"] = "application/json; charset=utf-8";
+      if (method === "PROPFIND") headers["Content-Type"] = "application/xml; charset=utf-8";
+      if (settings.username || settings.password) headers.Authorization = basicAuth(settings.username, settings.password);
+      const sent = gmRequest({
+        method,
+        url,
+        headers,
+        data,
+        timeout: REQUEST_TIMEOUT,
+        anonymous: true,
+        onload: (r) => {
+          if ((r.responseText || "").length > WEBDAV_BACKUP_MAX) return reject(new Error("WebDAV 响应超过 2MB，已拒绝读取"));
+          if (r.status >= 200 && r.status < 300 || acceptedStatuses.includes(r.status)) {
+            resolve({ status: r.status, body: r.responseText || "", responseHeaders: r.responseHeaders || "" });
+          } else reject(new Error(webDavStatusText(r.status)));
+        },
+        onerror: () => reject(new Error("网络连接失败，请检查地址、证书和 WebDAV 服务状态")),
+        ontimeout: () => reject(new Error("连接超时，请稍后重试"))
+      });
+      if (!sent) reject(new Error("当前脚本管理器不支持 WebDAV 网络请求"));
+    });
+  }
+  function webDavStatusText(status) {
+    if (status === 401) return "认证失败，请检查用户名或密钥";
+    if (status === 403) return "服务器拒绝访问，请检查文件权限";
+    if (status === 404) return "远端备份文件不存在";
+    if (status === 405) return "服务器不支持所需 WebDAV 操作，请检查仓库地址和目录权限";
+    if (status === 409) return "仓库父目录不存在，请检查 WebDAV 仓库地址";
+    if (status === 413) return "备份文件超过服务器允许的大小";
+    if (status === 412) return "远端文件刚被其他设备修改，请重新读取后再同步";
+    if (status === 507) return "WebDAV 存储空间不足";
+    return `WebDAV 请求失败（HTTP ${status || "未知"}）`;
+  }
+  async function uploadWebDavBackup(settings) {
+    const body = exportConfig();
+    if (body.length > WEBDAV_BACKUP_MAX) throw new Error("备份内容过大（超过 2MB）");
+    const directory = webDavBackupDirectory(settings);
+    const created = await webDavRequest(settings, directory, "MKCOL", void 0, [405]);
+    if (created.status === 405) {
+      const existing = await listWebDavDirectory(settings, directory, "0");
+      if (!existing.some((x) => x.url === directory && x.collection)) throw new Error("无法创建备份目录，或同名路径不是文件夹");
+    }
+    await webDavRequest(settings, webDavBackupUrl(settings), "PUT", body);
+  }
+  async function downloadWebDavBackup(settings) {
+    const response = await webDavRequest(settings, webDavBackupUrl(settings), "GET", void 0, [404]);
+    if (response.status === 404 && !settings.legacyBackupUrl) throw new Error("远端尚无配置备份，请先点击“立即备份”");
+    const raw = response.status === 404 ? (await webDavRequest(settings, settings.legacyBackupUrl, "GET")).body : response.body;
+    if (raw.length > WEBDAV_BACKUP_MAX) throw new Error("远端备份过大（超过 2MB），已拒绝读取");
+    return raw;
+  }
+  function webDavBackupDirectory(settings) {
+    return repositoryChildUrl(settings.url, [APP_NAME], true);
+  }
+  function webDavBackupUrl(settings) {
+    return repositoryChildUrl(settings.url, [APP_NAME, "config.json"]);
+  }
+  var PROPFIND_BODY = '<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>';
+  async function listWebDavDirectory(settings, directory, depth = "1") {
+    const response = await webDavRequest(settings, directory, "PROPFIND", PROPFIND_BODY, [], { Depth: depth });
+    return parseWebDavDirectory(response.body, settings.url, directory);
+  }
+  async function piliNaraFilesIn(settings, entries2) {
+    const folders = entries2.filter((x) => x.collection && x.name.toLowerCase() === "pilinara" && repositoryRelativePath(settings.url, x.url)?.length === 1);
+    const lists = await Promise.all(folders.map((x) => listWebDavDirectory(settings, x.url)));
+    return lists.flat().filter((x) => !x.collection && /^piliplus_settings_(phone|pad|desktop)\.json$/i.test(x.name)).map((x) => ({ url: x.url, name: x.name, device: x.name.match(/_(phone|pad|desktop)\.json$/i)[1].toLowerCase() })).sort((a, b) => a.name.localeCompare(b.name));
+  }
+  async function discoverPiliNaraFiles(settings) {
+    return piliNaraFilesIn(settings, await listWebDavDirectory(settings, normalizeWebDavRepositoryUrl(settings.url)));
+  }
+  async function testWebDavConnection(settings) {
+    const root = normalizeWebDavRepositoryUrl(settings.url);
+    const entries2 = await listWebDavDirectory(settings, root);
+    const files = await piliNaraFilesIn(settings, entries2);
+    const folder = entries2.find((x) => x.url === webDavBackupDirectory(settings) && x.collection);
+    const backupExists = !!folder && (await listWebDavDirectory(settings, folder.url)).some((x) => x.url === webDavBackupUrl(settings) && !x.collection);
+    return { backupExists, piliNaraFiles: files };
+  }
+  function parseWebDavBackup(raw) {
+    if (!raw || raw.length > WEBDAV_BACKUP_MAX) throw new Error("备份文件为空或超过 2MB");
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error("远端文件不是有效的 JSON");
+    }
+    if (!parsed || ![APP_NAME, "biliHoyoFairy"].includes(parsed.app) || !parsed.config || typeof parsed.config !== "object") {
+      throw new Error(`远端文件不是 ${APP_NAME} 配置备份`);
+    }
+    const incoming = sanitizeConfigInput(migrateConfig(structuredClone(parsed.config)));
+    NON_PORTABLE.forEach((k) => delete incoming[k]);
+    delete incoming.schemaVersion;
+    if (!incoming.block || !incoming.allow) throw new Error("远端配置缺少必要的规则结构");
+    return incoming;
+  }
+  function restoreWebDavBackup(raw) {
+    const incoming = parseWebDavBackup(raw);
+    deepMerge(CONFIG, incoming);
+    saveConfig();
+  }
+  function isJsonRecord(v) {
+    return !!v && typeof v === "object" && !Array.isArray(v);
+  }
+  function normalizeUid(v) {
+    const s = typeof v === "number" && Number.isSafeInteger(v) ? String(v) : typeof v === "string" ? v.trim() : "";
+    return /^[1-9]\d{0,19}$/.test(s) ? s : "";
+  }
+  function parsePiliNaraDocument(raw) {
+    if (!raw || raw.length > WEBDAV_BACKUP_MAX) throw new Error("PiliNara 配置文件为空或超过 2MB");
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error("PiliNara 配置文件不是有效的 JSON");
+    }
+    if (!isJsonRecord(parsed) || !isJsonRecord(parsed.setting) || !isJsonRecord(parsed.video) || !isJsonRecord(parsed.localCache)) {
+      throw new Error("文件不符合 PiliNara WebDAV 设置备份结构");
+    }
+    return parsed;
+  }
+  function blockedUsersOf(doc) {
+    const raw = doc.localCache.recommendBlockedMids;
+    const out = /* @__PURE__ */ Object.create(null);
+    if (Array.isArray(raw)) {
+      for (const value of raw) {
+        const uid = normalizeUid(value);
+        if (uid) out[uid] = `UID:${uid}`;
+      }
+    } else if (isJsonRecord(raw)) {
+      for (const [key, value] of Object.entries(raw)) {
+        const uid = normalizeUid(key);
+        if (!uid) continue;
+        const name = typeof value === "string" ? value.trim().slice(0, 200) : "";
+        out[uid] = name || `UID:${uid}`;
+      }
+    } else if (raw != null) {
+      throw new Error("PiliNara 的 recommendBlockedMids 字段格式不受支持");
+    }
+    return out;
+  }
+  function parsePiliNaraBlockedUsers(raw) {
+    return blockedUsersOf(parsePiliNaraDocument(raw));
+  }
+  function importPiliNaraBlockedUsers(raw) {
+    const remote = parsePiliNaraBlockedUsers(raw);
+    const seen = new Set(CONFIG.block.uids.map(String));
+    let added = 0;
+    let namesChanged = false;
+    for (const [uid, name] of Object.entries(remote)) {
+      if (!seen.has(uid)) {
+        seen.add(uid);
+        CONFIG.block.uids.push(uid);
+        added++;
+      }
+      if (name && CONFIG.uidNames[uid] !== name) {
+        setUidName(uid, name);
+        namesChanged = true;
+      }
+    }
+    if (added || namesChanged) saveConfig();
+    return { remoteCount: Object.keys(remote).length, added, localCount: CONFIG.block.uids.length };
+  }
+  function stringifyPiliNaraDocument(doc, entries2, originalMap = "") {
+    const marker = `__bfb_pilinara_blocked_${Date.now()}_${Math.random()}__`;
+    doc.localCache.recommendBlockedMids = marker;
+    const shell = JSON.stringify(doc, null, 4);
+    const needle = JSON.stringify(marker);
+    const span = jsonPropertySpan(shell, ["localCache", "recommendBlockedMids"]);
+    const at = span?.start ?? -1;
+    if (at < 0) throw new Error("无法生成 PiliNara 屏蔽名单");
+    const lineStart = shell.lastIndexOf("\n", at) + 1;
+    const indent = (shell.slice(lineStart).match(/^\s*/) || [""])[0];
+    const childIndent = indent + "    ";
+    const addedJson = entries2.map(([uid, name]) => `${childIndent}${JSON.stringify(uid)}: ${JSON.stringify(name)}`).join(",\n");
+    const mapJson = originalMap ? originalMap.slice(0, -1).trimEnd() + (Object.keys(JSON.parse(originalMap)).length ? "," : "") + `
+${addedJson}
+${indent}}` : entries2.length ? `{
+${addedJson}
+${indent}}` : "{}";
+    return shell.slice(0, at) + mapJson + shell.slice(at + needle.length);
+  }
+  function buildPiliNaraBackupWithMergedBlockedUsers(raw) {
+    const doc = parsePiliNaraDocument(raw);
+    const oldUsers = blockedUsersOf(doc);
+    const original = doc.localCache.recommendBlockedMids;
+    const span = isJsonRecord(original) ? jsonPropertySpan(raw, ["localCache", "recommendBlockedMids"]) : null;
+    const originalMap = span ? raw.slice(span.start, span.end) : "";
+    const next = /* @__PURE__ */ Object.create(null);
+    const orderedEntries = originalMap ? [] : Object.entries(oldUsers);
+    for (const [uid, name] of Object.entries(oldUsers)) next[uid] = name;
+    let added = 0;
+    let skippedInvalidUids = 0;
+    for (const value of CONFIG.block.uids) {
+      const uid = normalizeUid(value);
+      if (!uid) {
+        skippedInvalidUids++;
+        continue;
+      }
+      if (Object.prototype.hasOwnProperty.call(next, uid)) continue;
+      next[uid] = CONFIG.uidNames[uid] || `UID:${uid}`;
+      orderedEntries.push([uid, next[uid]]);
+      added++;
+    }
+    return {
+      body: added ? stringifyPiliNaraDocument(doc, orderedEntries, originalMap) : raw,
+      result: { written: (isJsonRecord(original) ? Object.keys(original).length : Object.keys(oldUsers).length) + added, added, skippedInvalidUids }
+    };
+  }
+  async function piliNaraTarget(settings, chosen) {
+    if (chosen) {
+      const relative = repositoryRelativePath(settings.url, chosen);
+      if (!relative || relative.length !== 2 || relative[0].toLowerCase() !== "pilinara" || !/^piliplus_settings_(phone|pad|desktop)\.json$/i.test(relative[1])) throw new Error("PiliNara 文件不在当前仓库下");
+      return chosen;
+    }
+    const files = await discoverPiliNaraFiles(settings);
+    if (!files.length) throw new Error("未找到 PiliNara 配置，请确认仓库下有 PiliNara 文件夹，并先在 PiliNara 中备份设置");
+    if (files.length > 1) throw new Error("发现多个 PiliNara 设备备份，请先测试连接并选择要合并的设备");
+    return files[0].url;
+  }
+  function responseHeader(raw, name) {
+    const wanted = name.toLowerCase();
+    for (const line of raw.split(/\r?\n/)) {
+      const i = line.indexOf(":");
+      if (i > 0 && line.slice(0, i).trim().toLowerCase() === wanted) return line.slice(i + 1).trim();
+    }
+    return "";
+  }
+  async function readPiliNaraBlockedUsers(settings, chosen) {
+    const response = await webDavRequest(settings, await piliNaraTarget(settings, chosen), "GET");
+    return importPiliNaraBlockedUsers(response.body);
+  }
+  async function writePiliNaraBlockedUsers(settings, chosen) {
+    const target = await piliNaraTarget(settings, chosen);
+    const response = await webDavRequest(settings, target, "GET");
+    const updated = buildPiliNaraBackupWithMergedBlockedUsers(response.body);
+    if (updated.body.length > WEBDAV_BACKUP_MAX) throw new Error("更新后的 PiliNara 配置超过 2MB，已拒绝写入");
+    const etag = responseHeader(response.responseHeaders, "etag");
+    if (updated.result.added) await webDavRequest(settings, target, "PUT", updated.body, [], etag ? { "If-Match": etag } : {});
+    return updated.result;
+  }
+
+  // src/ui/panel/sections/webdav.ts
+  var webdavSection = {
+    tab: "tools",
+    render(host, ctx) {
+      const saved = loadWebDavSettings();
+      const sec = document.createElement("div");
+      sec.className = "sec";
+      sec.innerHTML = `<label>☁ WebDAV 配置备份</label>
+      <div class="bfb-webdav-fields">
+        <label for="bfb-wd-url">WebDAV 仓库地址<input type="url" id="bfb-wd-url" placeholder="https://dav.example.com/dav/" autocomplete="off"></label>
+        <label for="bfb-wd-user">用户名<input type="text" id="bfb-wd-user" placeholder="WebDAV 用户名" autocomplete="username"></label>
+        <label for="bfb-wd-pass">密钥 / 应用专用密码<input type="password" id="bfb-wd-pass" placeholder="WebDAV 密钥或应用专用密码" autocomplete="current-password"></label>
+      </div>
+      <div class="hint" id="bfb-wd-path"></div>
+      <div class="toolbar" style="margin-top:8px">
+        <button class="act ghost" id="bfb-wd-save">保存设置</button><button class="act ghost" id="bfb-wd-test">测试连接</button>
+        <button class="act" id="bfb-wd-upload">立即备份</button><button class="act ghost" id="bfb-wd-restore">从云端恢复</button>
+      </div>
+      <div class="stat" id="bfb-wd-status" style="margin-top:7px"></div>
+      <label id="bfb-wd-devices" hidden>PiliNara 设备备份<select id="bfb-wd-device" aria-label="PiliNara 设备备份"></select></label>
+      <div class="hint" id="bfb-wd-found"></div>
+      <div class="toolbar" style="margin-top:8px">
+        <button class="act ghost" id="bfb-wd-pilinara-read">从 PiliNara 合并用户</button><button class="act ghost" id="bfb-wd-pilinara-write">向 PiliNara 合并用户</button>
+      </div>
+      <div class="hint">填写仓库目录，不是文件地址。备份时自动创建 <code>${APP_NAME}/</code>，配置保存在其中的 <code>config.json</code>。自动查找仓库下的 <code>PiliNara/</code>；多个设备备份需从识别结果中选择，无需手填文件路径。</div>
+      <div class="hint">PiliNara 仅同步 UID 黑名单，对应 <code>localCache.recommendBlockedMids</code>。两个方向都去重追加，不删除已有用户，不修改其他设置；不支持 BV/AV 视频名单。</div>
+      <div class="hint">配置备份不含 WebDAV 密钥、运行统计及个人状态。凭据只保存在本机；建议使用 HTTPS。首次访问自定义域名时，脚本管理器可能要求联网授权。</div>`;
+      host.appendChild(sec);
+      const url = q(sec, "#bfb-wd-url");
+      const username = q(sec, "#bfb-wd-user");
+      const password = q(sec, "#bfb-wd-pass");
+      const status = q(sec, "#bfb-wd-status");
+      const device = q(sec, "#bfb-wd-device");
+      const devices = q(sec, "#bfb-wd-devices");
+      const found = q(sec, "#bfb-wd-found");
+      const path = q(sec, "#bfb-wd-path");
+      const buttons = Array.from(sec.querySelectorAll("button"));
+      url.value = saved.url;
+      username.value = saved.username;
+      password.value = saved.password;
+      let files = [];
+      let discoveryKey = "";
+      const key = (s) => JSON.stringify([s.url, s.username, s.password]);
+      const showPath = (s) => {
+        path.textContent = s.url ? `本插件备份：${webDavBackupUrl(s)}` : `本插件备份：仓库/${APP_NAME}/config.json`;
+      };
+      showPath(saved);
+      const readAndSave = () => {
+        const s = saveWebDavSettings({ url: url.value, username: username.value, password: password.value });
+        url.value = s.url;
+        showPath(s);
+        return s;
+      };
+      const setBusy = (busy) => {
+        buttons.forEach((b) => b.disabled = busy);
+        device.disabled = busy;
+      };
+      const fail = (e) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        status.textContent = `失败：${msg}`;
+        toast(`WebDAV：${msg}`, "error");
+      };
+      const setFiles = (s, next) => {
+        const previous = discoveryKey === key(s) ? device.value : "";
+        files = next;
+        discoveryKey = key(s);
+        device.replaceChildren();
+        if (files.length > 1) device.add(new Option("请选择要合并的设备", ""));
+        for (const f of files) device.add(new Option(`${{ phone: "手机", pad: "平板", desktop: "桌面" }[f.device]} · ${f.name}`, f.url));
+        if (previous && files.some((f) => f.url === previous)) device.value = previous;
+        devices.hidden = files.length <= 1;
+        found.textContent = files.length === 1 ? `已识别 PiliNara：${files[0].url}` : files.length ? `已识别 ${files.length} 个 PiliNara 设备备份，请选择后合并。` : "尚未识别 PiliNara 备份。请先在 PiliNara 中备份设置，再测试连接。";
+      };
+      for (const field of [url, username, password]) field.addEventListener("input", () => {
+        files = [];
+        discoveryKey = "";
+        device.replaceChildren();
+        devices.hidden = true;
+        found.textContent = "";
+      });
+      const chosenFile = async (s) => {
+        if (discoveryKey !== key(s)) setFiles(s, await discoverPiliNaraFiles(s));
+        if (!files.length) throw new Error("未找到 PiliNara 配置，请先在 PiliNara 中备份设置，并确认仓库目录正确");
+        if (files.length > 1 && !device.value) throw new Error("请先选择要合并的 PiliNara 设备备份");
+        return files.length === 1 ? files[0].url : device.value;
+      };
+      q(sec, "#bfb-wd-save").onclick = () => {
+        try {
+          readAndSave();
+          status.textContent = "设置已保存，点击“测试连接”自动识别目录与设备备份";
+          toast("WebDAV 设置已保存", "success");
+        } catch (e) {
+          fail(e);
+        }
+      };
+      q(sec, "#bfb-wd-test").onclick = async () => {
+        setBusy(true);
+        status.textContent = "正在验证仓库并识别 PiliNara…";
+        try {
+          const s = readAndSave();
+          const result = await testWebDavConnection(s);
+          setFiles(s, result.piliNaraFiles);
+          status.textContent = result.backupExists ? "连接成功，已找到本插件备份" : "连接成功，点击“立即备份”自动创建本插件目录和配置文件";
+          toast("WebDAV 连接成功", "success");
+        } catch (e) {
+          fail(e);
+        } finally {
+          setBusy(false);
+        }
+      };
+      q(sec, "#bfb-wd-upload").onclick = async () => {
+        setBusy(true);
+        status.textContent = "正在创建备份目录并上传配置…";
+        try {
+          await uploadWebDavBackup(readAndSave());
+          status.textContent = `最近备份成功：${(/* @__PURE__ */ new Date()).toLocaleString()}`;
+          toast("配置已备份到 WebDAV", "success");
+        } catch (e) {
+          fail(e);
+        } finally {
+          setBusy(false);
+        }
+      };
+      q(sec, "#bfb-wd-restore").onclick = async () => {
+        setBusy(true);
+        try {
+          const s = readAndSave();
+          if (!await confirmModal("从 WebDAV 恢复规则与过滤开关？\n\n对应配置以云端备份为准；凭据、统计与个人状态不变。", { title: "从 WebDAV 恢复", okText: "恢复" })) return;
+          status.textContent = "正在下载并校验配置备份…";
+          restoreWebDavBackup(await downloadWebDavBackup(s));
+          rescanAfterRuleChange();
+          updateBadge();
+          toast("已从 WebDAV 恢复配置", "success");
+          ctx.rerender();
+        } catch (e) {
+          fail(e);
+        } finally {
+          setBusy(false);
+        }
+      };
+      q(sec, "#bfb-wd-pilinara-read").onclick = async () => {
+        setBusy(true);
+        status.textContent = "正在识别并读取 PiliNara 屏蔽用户…";
+        try {
+          const s = readAndSave();
+          const result = await readPiliNaraBlockedUsers(s, await chosenFile(s));
+          rescanAfterRuleChange();
+          updateBadge();
+          status.textContent = `已读取 ${result.remoteCount} 个用户，新增 ${result.added} 个；本地现有 ${result.localCount} 个 UID`;
+          toast(`已从 PiliNara 合并 ${result.added} 个屏蔽用户`, "success");
+        } catch (e) {
+          fail(e);
+        } finally {
+          setBusy(false);
+        }
+      };
+      q(sec, "#bfb-wd-pilinara-write").onclick = async () => {
+        setBusy(true);
+        try {
+          const s = readAndSave();
+          const chosen = await chosenFile(s);
+          if (!await confirmModal(`将本插件 UID 黑名单合并到 ${files.find((f) => f.url === chosen)?.name}？
+
+重复 UID 跳过，新增 UID 追加到末尾，不删除或替换已有用户；其他设置不变。`, { title: "合并 PiliNara 屏蔽名单", okText: "合并" })) return;
+          status.textContent = "正在校验并更新 PiliNara 配置…";
+          const result = await writePiliNaraBlockedUsers(s, chosen);
+          status.textContent = `已向 PiliNara 新增 ${result.added} 个用户，远端共 ${result.written} 个${result.skippedInvalidUids ? `，跳过 ${result.skippedInvalidUids} 个非数字 UID` : ""}`;
+          toast(`已向 PiliNara 合并 ${result.added} 个屏蔽用户`, "success");
+        } catch (e) {
+          fail(e);
+        } finally {
+          setBusy(false);
+        }
+      };
     }
   };
 
@@ -4938,15 +6898,15 @@
       <div class="hint">扫描本页所有被屏蔽的卡片并拉黑其 UP；无法获取 UID 的将通过 BV 号联网解析。此操作写入账号黑名单、不可一键撤销，执行前会二次确认。</div>`;
       host.appendChild(batch);
       q(batch, "#bfb-batch-block").onclick = () => {
-        const blocked = document.querySelectorAll("[" + ATTR_BLOCKED + "]");
-        if (!blocked.length) {
+        const blocked2 = document.querySelectorAll("[" + ATTR_BLOCKED + "]");
+        if (!blocked2.length) {
           toast("当前页还没有被屏蔽的卡片，先用规则屏蔽再批量拉黑");
           return;
         }
         const direct = [];
         const toResolve = [];
         let noInfo = 0;
-        blocked.forEach((card) => {
+        blocked2.forEach((card) => {
           const i = extractCardInfo(card);
           const cu = !i.uid && i.bvid ? cachedUid(i.bvid) : "";
           if (i.uid) direct.push({ uid: String(i.uid), name: i.up || "" });
@@ -4956,7 +6916,7 @@
         });
         const est = direct.length + toResolve.length;
         if (!est) {
-          toast(`本页 ${blocked.length} 张已屏蔽，但都拿不到 UID/BV，无法拉黑`);
+          toast(`本页 ${blocked2.length} 张已屏蔽，但都拿不到 UID/BV，无法拉黑`);
           return;
         }
         const slowTip = toResolve.length ? `
@@ -4988,15 +6948,15 @@
           }
           toast(`正在解析 ${toResolve.length} 个 UID…`);
           const resolved = [];
-          let pending = toResolve.length;
+          let pending2 = toResolve.length;
           toResolve.forEach((t) => {
             fetchView(t.bvid, (d) => {
               if (d && d.owner) resolved.push({ uid: String(d.owner.mid), name: d.owner.name || t.name });
               if (CONFIG.blacklistCollab && d && Array.isArray(d.staff)) {
                 d.staff.forEach((s) => resolved.push({ uid: String(s.mid), name: s.name || "" }));
               }
-              if (--pending === 0) runBlacklist(direct.concat(resolved));
-            });
+              if (--pending2 === 0) runBlacklist(direct.concat(resolved));
+            }, void 0, true);
           });
         };
         confirmModal(`将拉黑当前页约 ${est} 位 UP。${slowTip}${skipTip}
@@ -5384,6 +7344,7 @@ ${r.line}`, {
     ioSection,
     backupsSection,
     // 紧跟导入导出：都是「配置的保存与找回」，放一块儿用户才想得起来它
+    webdavSection,
     nameListSection,
     subscriptionsSection,
     batchBlockSection,
@@ -5409,7 +7370,7 @@ ${r.line}`, {
     p.id = "bfb-panel";
     p.tabIndex = -1;
     p.setAttribute("role", "dialog");
-    p.setAttribute("aria-label", "biliHoyoFairy 设置");
+    p.setAttribute("aria-label", `${APP_NAME} 设置`);
     ["keydown", "keypress", "keyup", "input"].forEach((ev) => {
       p.addEventListener(ev, (e) => {
         const t = e.target;
@@ -5432,7 +7393,7 @@ ${r.line}`, {
     p.innerHTML = "";
     setStatsRefresh(null);
     const h2 = document.createElement("h2");
-    h2.innerHTML = `🛡 biliHoyoFairy · 抗击黑潮 <small style="font-weight:normal;opacity:.6;font-size:12px">v${VERSION} · ${pageType()}</small> <span class="x" role="button" tabindex="0" aria-label="关闭设置面板">✕</span>`;
+    h2.innerHTML = `🛡 ${APP_NAME} <small style="font-weight:normal;opacity:.6;font-size:12px">v${VERSION} · ${pageType()}</small> <span class="x" role="button" tabindex="0" aria-label="关闭设置面板">✕</span>`;
     p.appendChild(h2);
     const xBtn = q(h2, ".x");
     xBtn.onclick = closePanel;
@@ -5615,7 +7576,7 @@ ${r.line}`, {
     }
     function start() {
       console.log(
-        `%c[biliHoyoFairy]%c v${VERSION} 已启动 | 页面:${pageType()} | 拦截:${CONFIG.enabled ? "开" : "关"}${CONFIG.debug ? " | 调试" : ""}`,
+        `%c[${APP_NAME}]%c v${VERSION} 已启动 | 页面:${pageType()} | 拦截:${CONFIG.enabled ? "开" : "关"}${CONFIG.debug ? " | 调试" : ""}`,
         BADGE + ";font-weight:bold",
         "color:#fb7299"
       );
@@ -5661,11 +7622,14 @@ ${r.line}`, {
         CONFIG.enabled = !CONFIG.enabled;
         saveConfig();
         updateBadge();
-        if (CONFIG.enabled) scanAll();
+        rescanAfterRuleChange();
       });
       GM_registerMenuCommand("打开官方黑名单管理页", () => window.open(BLACKLIST_MANAGE_URL, "_blank"));
     }
+    installHomeGrid();
+    installInitialStateHooks(scanAll);
     installNetworkHooks();
+    installHomeRefresh();
     installShadowHook();
     startScanner();
     if (document.readyState === "loading") {

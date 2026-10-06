@@ -1,9 +1,9 @@
 {
-  "name": "bilihoyofairy",
-  "version": "0.0.8",
+  "name": "bilihoyofairy-mx703",
+  "version": "0.0.10",
   "private": true,
   "type": "module",
-  "description": "B 站推荐流净化油猴脚本（biliHoyoFairy）",
+  "description": "B 站推荐流净化油猴脚本（biliHoyoFairy-MX703）",
   "scripts": {
     "build": "node scripts/build.mjs",
     "dev": "node scripts/build.mjs --watch",
@@ -16,6 +16,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/tampermonkey": "^5.0.5",
+    "@xmldom/xmldom": "^0.9.12",
     "esbuild": "^0.28.1",
     "eslint": "^10.5.0",
     "globals": "^17.6.0",

@@ -1,24 +1,61 @@
-// DOM 兜底层：处理网络拦截层覆盖不到的部分（首屏 SSR 漏网、需联网取数的进阶维度），命中即安全隐藏整张卡。
+// DOM 兜底层：SSR 和其它扩展的卡片在绘制前判定；已由数据层判定的不再补发接口/二次重排。
 // 单卡处理有错误边界，异形卡不会中断整轮扫描。
 import { CONFIG } from './config';
 import { ATTR_API, ATTR_BLOCKED, PROCESSED, GUTTER_RECALC_MS } from './constants';
-import { cellOf, isUnsafeHideTarget, UNPROCESSED_CARD_SELECTOR } from './page';
+import { cellOf, isUnsafeHideTarget, UNPROCESSED_CARD_SELECTOR, VIDEO_CARD_SELECTOR } from './page';
 import { SWIPE_BANNER } from './selectors';
-import { extractCardInfo, cacheCardInfo } from './cardinfo';
+import { extractCardInfo, cacheCardInfo, cachedCardInfo } from './cardinfo';
 import type { CardInfo } from './cardinfo';
-import { M, matchRule, matchApi, apiNeeds, apiRulesActive, isWhitelisted, rebuildRules } from './match/engine';
-import { fetchView, fetchTags, fetchCard } from './api';
+import { M, rebuildRules, ruleVersion } from './match/engine';
+import { dataVerdict, evaluateVideo, immediateVerdict } from './video-filter';
+import type { VideoVerdict } from './video-filter';
 import { recordBlock } from './stats';
 import { shadowRoots } from './shadow';
 import { scanComments } from './comments';
 import { addToList } from './rules';
 import { log, logErr, safe } from './logging';
+import { isInitialStatePending } from './initial-data';
 import { health, timed } from './health';
 import { hideEl, showEl } from './hide';
 import { toast } from './ui/toast';
 import { refreshPanelIfOpen } from './ui/hooks';
+import { refreshHomeGrid } from './home-grid';
 
-const countedEls = new WeakSet<Element>(); // DOM 兜底「已计数」去重
+const countedEls = new WeakMap<Element, string>(); // 节点复用为另一视频时仍要计数
+const recognizedCards = new WeakSet<HTMLElement>();
+let recognizedCount = 0;
+const pendingCards = new WeakMap<HTMLElement, object>();
+const waitingVisuals = new WeakMap<HTMLElement, { value: string; priority: string }>();
+let domBatch: Array<{ result: Promise<VideoVerdict>; apply: (reason: string | null, info: CardInfo) => void; info: CardInfo }> = [];
+let batchQueued = false;
+
+function queueVerdict(result: Promise<VideoVerdict>, apply: (reason: string | null, info: CardInfo) => void, info: CardInfo): void {
+  domBatch.push({ result, apply, info });
+  if (batchQueued) return;
+  batchQueued = true;
+  queueMicrotask(() => {
+    batchQueued = false;
+    const batch = domBatch;
+    domBatch = [];
+    Promise.all(batch.map((job) => job.result.catch(() => ({ reason: null, info: job.info })))).then((results) => {
+      // 一轮新增节点的判定一起提交，不能逐张“放行后又被其它卡补位”。
+      results.forEach((v, index) => batch[index].apply(v.reason, v.info));
+    });
+  });
+}
+
+function waitForVerdict(card: HTMLElement): void {
+  if (!waitingVisuals.has(card)) waitingVisuals.set(card, { value: card.style.getPropertyValue('visibility'), priority: card.style.getPropertyPriority('visibility') });
+  card.style.setProperty('visibility', 'hidden', 'important');
+}
+
+function endWait(card: HTMLElement): void {
+  const saved = waitingVisuals.get(card);
+  if (!saved) return;
+  waitingVisuals.delete(card);
+  if (saved.value) card.style.setProperty('visibility', saved.value, saved.priority);
+  else card.style.removeProperty('visibility');
+}
 
 // 撤销 DOM 层对某卡的隐藏 / 审查标记（规则变更后重扫时调用）。
 function clearVisual(card: HTMLElement) {
@@ -133,78 +170,97 @@ export function blockVideo(card: HTMLElement, reason: string, info: CardInfo): v
     fixParityGutter(cell.parentElement);
   }
   card.setAttribute(ATTR_BLOCKED, '1'); // 供「批量拉黑」扫描
-  if (countedEls.has(card)) return;
-  countedEls.add(card);
+  const key = info.bvid || info.uid + ':' + info.title;
+  if (countedEls.get(card) === key) return;
+  countedEls.set(card, key);
   recordBlock(reason, info, 'DOM');
 }
 
 // 单卡处理用错误边界包裹：异形卡导致 extractCardInfo/matchRule 抛错时，只跳过这一张、不中断整轮扫描。
-const processCard = safe('processCard', function (card: HTMLElement) {
+const processCard = safe('processCard', function (card: HTMLElement, fresh = false) {
   if (!CONFIG.enabled) return;
-  const info = extractCardInfo(card, M.needUid); // 无 UID 规则时跳过昂贵的 innerHTML 兜底
-  if (!info.title && !info.up && !info.isLive) return; // 骨架卡，等填充后再处理（直播卡常无标题，放行交给规则判定）
-  card.setAttribute(PROCESSED, '1');
-  cacheCardInfo(card, info);
-  const hit = matchRule(info);
-  // 惰性：这行每张卡都会走一次，debug 关时不该付拼串的代价
-  if (!hit) log(() => `放行✅ | 标题:${info.title || '(无)'} | UP:${info.up || '(无)'} | 标签:${info.partition || '(无)'}`);
-  if (hit) {
-    blockVideo(card, hit, info);
+  if (isInitialStatePending(card)) return;
+  let info = extractCardInfo(card, M.needUid);
+  if (!info.title && !info.up && !info.isLive) {
+    // Vue 会把已屏蔽的视频节点复用成加载骨架；撤销本插件的隐藏，不能把旧状态带到新一轮占位。
+    if (card.hasAttribute(PROCESSED) || pendingCards.has(card)) {
+      pendingCards.delete(card);
+      endWait(card);
+      clearVisual(card);
+      card.removeAttribute(PROCESSED);
+      card.removeAttribute(ATTR_API);
+      countedEls.delete(card);
+      cacheCardInfo(card, info);
+    }
     return;
   }
-  // 过了本地规则、未命中白名单、且开了精确过滤 → 按需取数再判（限速、缓存）
-  if (info.bvid && apiRulesActive()) evaluateApi(card, info);
+  if (card.closest(SWIPE_BANNER)) return;
+  if (!recognizedCards.has(card)) {
+    recognizedCards.add(card);
+    health.cardsSeen = Math.max(health.cardsSeen, ++recognizedCount);
+  }
+  const displayed = !fresh && card.hasAttribute(PROCESSED);
+  const previous = cachedCardInfo(card);
+  if (previous && previous.bvid === info.bvid && previous.title === info.title) {
+    info = { ...info, uid: info.uid || previous.uid, partition: info.partition || previous.partition, likes: info.likes ?? previous.likes, views: info.views ?? previous.views };
+  }
+  card.setAttribute(PROCESSED, '1');
+  cacheCardInfo(card, info);
+  const token = {};
+  pendingCards.set(card, token);
+  const version = ruleVersion;
+  const apply = (reason: string | null, complete: CardInfo) => {
+    if (pendingCards.get(card) !== token || version !== ruleVersion) return;
+    pendingCards.delete(card);
+    if (!card.isConnected) {
+      // 原生渲染模型已移除的卡片，不再用迟到的 DOM 兜底重复计数；复用时重新识别。
+      endWait(card); clearVisual(card); card.removeAttribute(PROCESSED); card.removeAttribute(ATTR_API);
+      return;
+    }
+    cacheCardInfo(card, complete);
+    if (reason && CONFIG.enabled) {
+      if (CONFIG.reviewMode) clearVisual(card);
+      else {
+        card.classList.remove('bfb-review');
+        card.querySelector(':scope > .bfb-tag')?.remove();
+      }
+      blockVideo(card, reason, complete);
+    } else clearVisual(card);
+    endWait(card);
+  };
+  const known = dataVerdict(info.bvid, info.title, info.uid) || immediateVerdict(info);
+  if (known) {
+    if (!displayed && !CONFIG.reviewMode) waitForVerdict(card);
+    queueVerdict(Promise.resolve(known), apply, info);
+    return;
+  }
+  // 新卡尚未绘制时留住格子、不显示内容；一批网络卡根本不会走到这里。
+  // 修改已显示视频的屏蔽规则时维持旧显隐，判定后才作一次必要的重新排列。
+  if (!displayed && !CONFIG.reviewMode) waitForVerdict(card);
+  card.setAttribute(ATTR_API, '1');
+  queueVerdict(evaluateVideo(info), apply, info);
 });
 
-// 异步评估：只取需要的接口，命中则隐藏/标记（与本地规则同一套出口 blockVideo）。
-function evaluateApi(card: HTMLElement, info: CardInfo) {
-  if (card.getAttribute(ATTR_API)) return;
-  card.setAttribute(ATTR_API, '1');
-  const need = apiNeeds();
-  let view: any = null;
-  let tags: string[] | null = null;
-  let cardData: any = null;
-  let pending = 1; // 守卫位：占位到所有同步派发完成再释放，避免缓存命中的同步回调导致 pending 中途归零、提前 finish
-  const finish = () => {
-    if (pending > 0) return;
-    if (!CONFIG.enabled || isWhitelisted(info)) return;
-    const hit = matchApi(info, view, tags, cardData);
-    if (hit) blockVideo(card, hit, info);
-    else log(`API放行 | ${info.title || ''}`);
-  };
-  const afterView = () => {
-    // UP 卡片需要 mid：优先用 DOM 解析到的，没有就用 view.owner.mid
-    if (need.needCard) {
-      const mid = info.uid || (view && view.owner && view.owner.mid);
-      if (mid) {
-        pending++;
-        fetchCard(mid, (c) => {
-          cardData = c;
-          pending--;
-          finish();
-        });
-      }
-    }
-    finish();
-  };
-  if (need.needView) {
-    pending++;
-    fetchView(info.bvid, (v) => {
-      view = v;
-      pending--;
-      afterView();
-    });
-  }
-  if (need.needTag) {
-    pending++;
-    fetchTags(info.bvid, (t) => {
-      tags = t;
-      pending--;
-      finish();
-    });
-  }
-  pending--; // 释放守卫：同步派发已结束；若此刻请求都已（同步）完成则在此真正评估一次
-  finish();
+/** 新增 / 复用节点的窄扫描，MutationObserver 微任务内完成，避免稳态 250ms 扫描前先闪出来。 */
+export function scanAddedNode(node: Node): void {
+  if (!CONFIG.enabled || node.nodeType !== 1) return;
+  const el = node as Element;
+  if (el.matches(VIDEO_CARD_SELECTOR) && !el.hasAttribute(PROCESSED)) processCard(el as HTMLElement);
+  for (const card of el.querySelectorAll<HTMLElement>(UNPROCESSED_CARD_SELECTOR)) processCard(card);
+}
+
+export function inspectChangedCard(node: Node, seen?: Set<HTMLElement>): void {
+  if (!CONFIG.enabled) return;
+  const el = node.nodeType === 1 ? node as Element : node.parentElement;
+  const card = el?.closest<HTMLElement>(VIDEO_CARD_SELECTOR);
+  if (!card || card.closest('#bfb-panel, .bfb-tag')) return;
+  if (seen?.has(card)) return;
+  seen?.add(card);
+  const old = cachedCardInfo(card);
+  if (!old) { processCard(card); return; }
+  const info = extractCardInfo(card, M.needUid);
+  if (!info.title && !info.up && !info.isLive) { processCard(card, true); return; }
+  if (info.title && (info.bvid !== old.bvid || info.title !== old.title || info.up !== old.up)) processCard(card, true);
 }
 
 // 跨主文档与所有存活 shadow root 的查询。
@@ -245,11 +301,13 @@ export function scanAll(): void {
 
 export function rescanAfterRuleChange(): void {
   timed('rules.rebuild', rebuildRules);
+  refreshHomeGrid();
   // 必须穿透 shadow：扫描会处理 shadow 内的卡，这里就得能把它们的标记一并清掉
   queryAllRoots('[' + PROCESSED + ']').forEach((el) => {
-    el.removeAttribute(PROCESSED);
     el.removeAttribute(ATTR_API);
-    clearVisual(el);
+    pendingCards.delete(el);
+    if (!CONFIG.enabled) { clearVisual(el); endWait(el); }
+    else processCard(el); // 不先全体显示再隐藏；原来隐藏的仍等新判定完成后才恢复。
   });
   scanAll();
   scanComments(); // ruleVersion 已自增，评论会按新规则重判

@@ -17,6 +17,7 @@ export const baseSection: PanelSection = {
       <div class="switch"><input type="checkbox" id="bfb-enabled"> 启用拦截</div>
       <div class="switch"><input type="checkbox" id="bfb-review"> 🔍 审查模式（不隐藏，仅标记被拦视频并提供就地放行，便于核对）</div>
       <div class="switch"><input type="checkbox" id="bfb-rclick"> 右键卡片弹出菜单（屏蔽、拉黑、加入白名单）</div>
+      <div class="switch"><input type="checkbox" id="bfb-invert-shift-rclick"> 反转 Shift+右键（普通右键显示原生菜单，Shift+右键显示插件菜单）</div>
       <div class="switch"><input type="checkbox" id="bfb-hoverbtn"> 悬停卡片显示快捷「拉黑 / 不看这个」按钮</div>
       <div class="switch"><input type="checkbox" id="bfb-collab"> 联合投稿一并拉黑合作者</div>
       <div class="switch"><input type="checkbox" id="bfb-fuzzy"> 反绕过模糊匹配（「原 神」「原.神」同样拦截；隐形字符始终拦截）</div>
@@ -32,6 +33,7 @@ export const baseSection: PanelSection = {
     });
     bindControl(sw, 'bfb-review', CONFIG, 'reviewMode', { after: rescanAfterRuleChange });
     bindControl(sw, 'bfb-rclick', CONFIG, 'rightClickBlock');
+    bindControl(sw, 'bfb-invert-shift-rclick', CONFIG, 'invertShiftRightClick');
     bindControl(sw, 'bfb-hoverbtn', CONFIG, 'cardHoverBtn', { after: hideHoverBtn });
     bindControl(sw, 'bfb-collab', CONFIG, 'blacklistCollab');
     bindControl(sw, 'bfb-fuzzy', CONFIG, 'fuzzyMatch', { after: rescanAfterRuleChange });
@@ -42,6 +44,25 @@ export const baseSection: PanelSection = {
         rescanAfterRuleChange();
       },
     });
+
+    const notices = document.createElement('div');
+    notices.className = 'sec';
+    notices.innerHTML = `
+      <label>通知提示</label>
+      <div class="switch"><input type="checkbox" id="bfb-notifications"> 显示页面通知（操作结果、启动汇总等）</div>
+      <div id="bfb-notification-options">
+        <div class="switch"><input type="checkbox" id="bfb-risk-notifications"> 触发 B 站风控时提醒</div>
+      </div>
+      <div class="hint">关闭风控提醒只隐藏弹出的提示，联网熔断、暂停和自动退避仍会照常保护账号。拉黑、清空规则、恢复备份等危险操作的确认框不受此开关影响。</div>`;
+    host.appendChild(notices);
+    const noticeOptions = notices.querySelector<HTMLElement>('#bfb-notification-options')!;
+    const syncNoticeOptions = () => {
+      noticeOptions.style.opacity = CONFIG.showNotifications ? '1' : '.4';
+      noticeOptions.style.pointerEvents = CONFIG.showNotifications ? 'auto' : 'none';
+    };
+    bindControl(notices, 'bfb-notifications', CONFIG, 'showNotifications', { after: syncNoticeOptions });
+    bindControl(notices, 'bfb-risk-notifications', CONFIG, 'showRiskNotifications');
+    syncNoticeOptions();
 
     const ct = document.createElement('div');
     ct.className = 'sec';

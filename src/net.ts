@@ -1,12 +1,15 @@
 // 网络拦截层（数据层过滤，主路径）：hook fetch / XHR，被动过滤 B 站自身请求的 JSON 列表，
-// 把命中本地规则的项从数组删掉，让页面只渲染保留项。只读不发——不重发请求、不需 WBI、不触发风控。
+// 把命中规则的项从数组删掉，让页面只渲染保留项；进阶规则也在响应交给页面之前完成。
 import { CONFIG } from './config';
 import { log, logErr } from './logging';
 import { normDynamicItem, normFeedItem } from './cardinfo';
 import type { CardInfo } from './cardinfo';
-import { matchRule } from './match/engine';
 import { recordBlock } from './stats';
 import { health } from './health';
+import { dataVerdict, evaluateVideo, FILTER_WAIT_MS, immediateVerdict } from './video-filter';
+import { filterCommentJson, isCommentUrl } from './comment-data';
+import { installXhrHooks } from './net-xhr';
+import { isMetadataUrl, observeMetadata } from './metadata-cache';
 
 // 接口注册：re=URL 匹配，get=从 data 里取出可过滤的数组（就地 splice 即生效）。
 // norm=把该接口的列表项归一成 CardInfo；不填则用 normFeedItem（推荐流那套扁平字段）。
@@ -16,7 +19,35 @@ export interface FeedHook {
   re: RegExp;
   get: (d: any) => any[] | null;
   norm?: (it: any) => CardInfo | null;
+  lists?: (d: any) => VideoSource[];
 }
+export interface VideoSource { items: any[]; norm?: (it: any) => CardInfo | null }
+
+/** 搜索综合 / 视频页，以及用户卡片内的投稿预览；不删除用户卡片本身。 */
+export function searchVideoSources(data: any): VideoSource[] {
+  if (!Array.isArray(data?.result)) return [];
+  const groups = data.result;
+  if (!groups.length || !groups[0]?.result_type) {
+    return !groups.length || groups.some((it: any) => it?.type === 'video' || it?.bvid)
+      ? [{ items: groups }] : [];
+  }
+  const sources: VideoSource[] = [];
+  for (const group of groups) {
+    if (!Array.isArray(group?.data)) continue;
+    if (group.result_type === 'video') sources.push({ items: group.data });
+    if (group.result_type === 'bili_user' || group.result_type === 'user') {
+      for (const user of group.data) if (Array.isArray(user?.res)) {
+        sources.push({ items: user.res, norm: (it) => it && normFeedItem({ ...it, owner: { mid: user.mid, name: user.uname } }) });
+      }
+    }
+  }
+  return sources;
+}
+const feedSources = (hook: FeedHook, data: any): VideoSource[] => {
+  if (hook.lists) return hook.lists(data);
+  const items = hook.get(data);
+  return items ? [{ items, norm: hook.norm }] : [];
+};
 export const FEED_HOOKS: FeedHook[] = [
   { re: /\/x\/web-interface\/wbi\/index\/top\/feed\/rcmd/, get: (d) => (d && Array.isArray(d.item) ? d.item : null) },
   { re: /\/x\/web-interface\/index\/top\/feed\/rcmd/, get: (d) => (d && Array.isArray(d.item) ? d.item : null) },
@@ -25,15 +56,16 @@ export const FEED_HOOKS: FeedHook[] = [
   { re: /\/x\/web-interface\/archive\/related/, get: (d) => (Array.isArray(d) ? d : null) },
   // 搜索页：type=视频 时 data.result 直接是视频数组；综合(all/v2) 时 data.result 是分组，取 result_type==='video' 的 data
   {
-    re: /\/x\/web-interface\/wbi\/search\/(type|all\/v2)/,
+    re: /\/x\/web-interface\/(?:wbi\/)?search\/(type|all\/v2)/,
     get: (d) => {
       if (!d || !Array.isArray(d.result)) return null;
       if (d.result.length && d.result[0] && d.result[0].result_type) {
         const g = d.result.find((x: any) => x.result_type === 'video');
         return g && Array.isArray(g.data) ? g.data : null;
       }
-      return d.result;
+      return searchVideoSources(d)[0]?.items || null;
     },
+    lists: searchVideoSources,
   },
   // 动态流（t.bilibili.com）。此前这是唯一一个完全靠 DOM 兜底的主要页面——DOM 层只能在卡片
   // 画出来之后再隐藏，且抠不到 UID 这类权威字段。接到拦截层后与首页同源同判。
@@ -60,6 +92,44 @@ export function findFeedHook(url: string | null | undefined): FeedHook | null {
   return hit;
 }
 const isFeedUrl = (url: string | null | undefined): boolean => !!findFeedHook(url);
+const isFilteredUrl = (url: string): boolean => isFeedUrl(url) || isCommentUrl(url) || isMetadataUrl(url);
+
+/** 对已知视频数组同步过滤（首屏状态 / 同步 XHR）；metadata 尚未就绪的留给异步闸门。 */
+export function filterVideoList(arr: any[], norm: (it: any) => CardInfo | null = normFeedItem, record = (reason: string, info: CardInfo) => recordBlock(reason, info, 'NET')): number {
+  if (!CONFIG.enabled || CONFIG.reviewMode) return 0;
+  let removed = 0;
+  for (let i = arr.length - 1; i >= 0; i--) {
+    try {
+      const info = norm(arr[i]);
+      if (!info) continue;
+      const verdict = dataVerdict(info.bvid, info.title, info.uid);
+      const reason = verdict ? verdict.reason : immediateVerdict(info)?.reason;
+      if (reason) {
+        record(reason, verdict?.info || info);
+        arr.splice(i, 1);
+        removed++;
+      }
+    } catch (e) {
+      log('拦截层 单项判定异常（已跳过）', e);
+    }
+  }
+  return removed;
+}
+
+/** 整批判定完成后一次提交，不边取标签边把条目一张张交给页面。保留原数组身份、分页游标和顺序。 */
+export async function prepareVideoList(arr: any[], norm: (it: any) => CardInfo | null = normFeedItem): Promise<void> {
+  if (!CONFIG.enabled || CONFIG.reviewMode) return;
+  const deadline = Date.now() + FILTER_WAIT_MS;
+  health.pendingFilters++;
+  try { await Promise.all(arr.map(async (item) => {
+    try {
+      const info = norm(item);
+      if (info) await evaluateVideo(info, deadline, true);
+    } catch (e) {
+      log('拦截层 异步判定异常（已放行）', e);
+    }
+  })); } finally { health.pendingFilters--; }
+}
 
 // 就地过滤一个已解析的 JSON 响应：命中项从 json.data 的数组里原地 splice 删除。
 // 返回删除条数（0 表示未改动），调用方据此决定是否需要重建响应/重序列化。
@@ -67,34 +137,32 @@ export function filterFeedJson(url: string, json: any): number {
   if (!json || json.code !== 0 || !json.data) return 0;
   const hook = findFeedHook(url);
   if (!hook) return 0;
-  const arr = hook.get(json.data);
-  if (!arr || !arr.length) return 0;
+  const sources = feedSources(hook, json.data);
+  if (!sources.length) return 0;
   // 自检先于开关记账：这两个计数反映的是「管线还通不通」，与用户是否启用拦截无关。
   // B 站改字段名时 feedParsed 会停在 0，健康检查据此报警。
   health.feedParsed++;
-  health.feedItems += arr.length;
+  health.feedItems += sources.reduce((count, source) => count + source.items.length, 0);
   // 审查模式下不在数据层删项，让视频照常渲染，交给 DOM 层标记，便于核对
-  if (!CONFIG.enabled || CONFIG.reviewMode) return 0;
   let removed = 0;
-  for (let i = arr.length - 1; i >= 0; i--) {
-    try {
-      const info = (hook.norm || normFeedItem)(arr[i]);
-      if (!info) continue;
-      if (info.likes != null) health.feedLikes++; // 白名单由 matchRule 内部短路，无需在此重复判断
-      const reason = matchRule(info);
-      if (reason) {
-        recordBlock(reason, info, 'NET');
-        arr.splice(i, 1);
-        removed++;
-      }
-    } catch (e) {
-      // 逐项容错：单条畸形 item 抛错只跳过该项，不让整条响应放弃过滤（B站偶发异形数据时尤其重要）。
-      // 走 debug 日志而非 logErr：异形项可能成批出现，不该刷屏正常用户的控制台。
-      log('拦截层 单项判定异常（已跳过）', e);
-    }
+  for (const { items, norm } of sources) {
+    for (const it of items) if (it?.stat?.like != null || it?.stats?.like != null) health.feedLikes++;
+    removed += filterVideoList(items, norm);
+    health.feedKept += items.length;
   }
   if (removed) log(`拦截层 删除 ${removed} 项 @ ${url.split('?')[0]}`);
   return removed;
+}
+
+export async function filterFeedJsonAsync(url: string, json: any): Promise<number> {
+  if (!json || json.code !== 0 || !json.data) return 0;
+  const hook = findFeedHook(url);
+  if (!hook) return 0;
+  const sources = feedSources(hook, json.data);
+  if (!sources.length) return 0;
+  await Promise.all(sources.map(({ items, norm }) => prepareVideoList(items, norm)));
+  // 配置可能在取数期间改变；最终提交仍走当前规则，不使用旧版本的异步命中。
+  return filterFeedJson(url, json);
 }
 
 // 可插拔网络管线（以「JSON 原地过滤」为中心，fetch 与 XHR 共用一套）。
@@ -114,10 +182,10 @@ type PostFn = (url: string, json: any) => number;
 const SIGNED_RE = /[?&]w_rid=/;
 const NET = (() => {
   const preFns: PreFn[] = [];
-  const postFns: PostFn[] = [];
+  const postFns: Array<{ sync: PostFn; async: (url: string, json: any) => number | Promise<number> }> = [];
   return {
     addPre: (fn: PreFn) => preFns.push(fn),
-    addPost: (fn: PostFn) => postFns.push(fn),
+    addPost: (fn: PostFn, asyncFn: (url: string, json: any) => number | Promise<number> = fn) => postFns.push({ sync: fn, async: asyncFn }),
     hasPre: () => preFns.length > 0,
     rewriteUrl(url: string): string {
       let u = url;
@@ -140,10 +208,17 @@ const NET = (() => {
       let removed = 0;
       for (const fn of postFns) {
         try {
-          removed += fn(url, json) || 0;
+          removed += fn.sync(url, json) || 0;
         } catch (e) {
           logErr('NET.post', e); // 同上：过滤器整体抛错=该页不再拦截，必须可见
         }
+      }
+      return removed;
+    },
+    async runJsonAsync(url: string, json: any): Promise<number> {
+      let removed = 0;
+      for (const fn of postFns) {
+        try { removed += (await fn.async(url, json)) || 0; } catch (e) { logErr('NET.post.async', e); }
       }
       return removed;
     },
@@ -159,9 +234,25 @@ export function rewriteRequestUrl(url: string): string {
 // 保留 wbi/ 那一路的匹配：改写会被上面的 SIGNED_RE 兜底拦下并计数，比在这里假装 wbi 不存在
 // 更诚实——用户开了开关却没效果时，自检能说出原因。未签名的旧路径上它照常生效。
 const RCMD_RE = /\/x\/web-interface\/(wbi\/)?index\/top\/feed\/rcmd/;
+let homeFeedEpoch = 0;
+export function advanceHomeFeedEpoch(): void { homeFeedEpoch++; }
+const homeRequestContext = (url: string): number | undefined =>
+  RCMD_RE.test(url) && location.hostname === 'www.bilibili.com' && location.pathname === '/' ? homeFeedEpoch : undefined;
+
+function discardStaleHomeFeed(json: any, context: unknown, note = true): number | null {
+  if (typeof context !== 'number' || context === homeFeedEpoch) return null;
+  const arr = json?.code === 0 && json.data?.item;
+  if (!Array.isArray(arr)) return null;
+  if (note) health.feedParsed++; // 已确认响应形状；丢弃过时批次不意味着管线解析失败。
+  const count = arr.length;
+  arr.length = 0;
+  return count; // 过时的批次不是“规则屏蔽”，不计入屏蔽记录，也不能再追加回刚刷新的页面。
+}
 
 // 注册唯一的内容过滤 postFn（即 filterFeedJson）；以后新增过滤器只需再 addPost 一条。
-NET.addPost(filterFeedJson);
+NET.addPost(filterFeedJson, filterFeedJsonAsync);
+NET.addPost(filterCommentJson);
+NET.addPost((url, json) => { observeMetadata(url, json); return 0; });
 // 注册「增大首页推荐请求数」preFn（默认关，opt-in）：拦截层会删项，调大 ps 可让信息流删后仍饱满。
 NET.addPre((url) => {
   if (!CONFIG.boostFeedLoad) return;
@@ -171,13 +262,11 @@ NET.addPre((url) => {
 });
 
 // 过滤文本响应：无删项时原样返回 raw（省一次序列化、且保持字节一致）。
-function computeFilteredText(url: string, raw: string): string {
-  try {
-    const json = JSON.parse(raw);
-    return NET.runJson(url, json) ? JSON.stringify(json) : raw;
-  } catch (e) {
-    return raw;
-  }
+async function filterResponseJson(url: string, json: any, context?: unknown): Promise<number> {
+  const stale = discardStaleHomeFeed(json, context);
+  if (stale !== null) return stale;
+  const removed = await NET.runJsonAsync(url, json);
+  return removed + (discardStaleHomeFeed(json, context, false) || 0);
 }
 
 export function installNetworkHooks(): void {
@@ -191,26 +280,36 @@ export function installNetworkHooks(): void {
       // 请求改写（preFn）：仅当输入是字符串 URL 时处理，避免重建 Request 对象的副作用
       let input2 = input;
       if (typeof input === 'string') input2 = rewriteRequestUrl(input);
-      const url = typeof input2 === 'string' ? input2 : (input2 && input2.url) || '';
+      const url = typeof input2 === 'string' ? input2 : input2?.url || input2?.href || '';
+      const signal = init?.signal || input?.signal;
+      const context = homeRequestContext(url);
       const p = origFetch.call(this, input2, init);
       health.noteRequest(url);
-      if (!isFeedUrl(url)) return p;
-      health.feedMatched++;
-      return p.then((resp: Response) =>
-        resp
-          .clone()
-          .json()
-          .then((json: any) => {
-            // 无命中删项：原样返回真实响应，保留 url/type/redirected 等元信息，且不重序列化
-            if (!NET.runJson(url, json)) return resp;
-            // 有删项才重建响应：剔除 content-encoding/length（正文已是明文 JSON，旧头会误导消费者）
-            const h = new Headers(resp.headers);
-            h.delete('content-encoding');
-            h.delete('content-length');
-            return new RespCtor(JSON.stringify(json), { status: resp.status, statusText: resp.statusText, headers: h });
-          })
-          .catch(() => resp)
-      );
+      if (!isFilteredUrl(url)) return p;
+      const feed = isFeedUrl(url);
+      if (feed) { health.feedMatched++; health.pendingResponses++; }
+      return p.then(async (resp: Response) => {
+        const checkAbort = () => { if (signal?.aborted) throw signal.reason || new (W.DOMException || DOMException)('The operation was aborted.', 'AbortError'); };
+        let json: any;
+        try { json = await resp.clone().json(); } catch (e) { checkAbort(); return resp; }
+        checkAbort();
+        const changed = await filterResponseJson(url, json, context);
+        checkAbort();
+        // 无删项保留真实响应；取消请求不能被上面的解析容错误当成“正常放行”。
+        if (!changed) return resp;
+        const h = new (W.Headers || Headers)(resp.headers);
+        h.delete('content-encoding');
+        h.delete('content-length');
+        const filtered = new RespCtor(JSON.stringify(json), { status: resp.status, statusText: resp.statusText, headers: h });
+        // Response 构造器不会保留 url/type；连 clone() 也必须保留（Axios / 其他脚本可能读取）。
+        const preserve = (out: Response): Response => {
+          for (const key of ['url', 'type', 'redirected'] as const) Object.defineProperty(out, key, { value: resp[key], configurable: true });
+          const clone = out.clone.bind(out);
+          out.clone = () => preserve(clone());
+          return out;
+        };
+        return preserve(filtered);
+      }).finally(() => { if (feed) health.pendingResponses--; });
     };
     wrapped.__bfb = true;
     try {
@@ -220,81 +319,16 @@ export function installNetworkHooks(): void {
     }
   }
 
-  // —— XMLHttpRequest —— 在 open 时给目标请求实例装上惰性 getter，
-  // 读取时（readyState 4）才解析+过滤，规避页面处理器先于我们读取的时序问题。
-  const XHR = W.XMLHttpRequest;
-  if (XHR && XHR.prototype && !XHR.prototype.__bfb) {
-    const origOpen = XHR.prototype.open;
-    const dText = Object.getOwnPropertyDescriptor(XHR.prototype, 'responseText');
-    const dResp = Object.getOwnPropertyDescriptor(XHR.prototype, 'response');
-    // async/user/password 照原样透传：签名写全，既不必再摸 arguments，也让「透传」这件事看得见。
-    XHR.prototype.open = function (this: any, method: string, url: string, async = true, user?: string | null, password?: string | null) {
-      // eslint-disable-next-line @typescript-eslint/no-this-alias -- 下面 defineProperty 的 getter 有自己的 this，必须在这里捕获实例
-      const self = this;
-      // ⚠ XHR 实例是可复用的（同一个对象可以连续 open 多次）。上一轮装的惰性 getter 与文本 memo
-      // 若不清理，第二次请求会读到第一次的过滤结果；第二次若是非 feed URL（不再进入下面的分支），
-      // 残留的 getter 会把完全无关接口的响应替换成上一次的 JSON。故每次 open 先无条件复位。
-      if (self.__bfbHooked) {
-        delete self.responseText;
-        delete self.response;
-        self.__bfbHooked = false;
-      }
-      self.__bfbText = undefined;
-      self.__bfbResp = undefined;
-      // 请求改写（preFn）：仅处理字符串 URL
-      const url2 = typeof url === 'string' ? rewriteRequestUrl(url) : url;
-      health.noteRequest(url2);
-      if (isFeedUrl(url2)) {
-        health.feedMatched++;
-        // 同一次响应只过滤一次：responseText 与 response(text 型) 共用这份文本 memo，
-        // 避免消费者同时读两者时过滤跑两遍、导致计数与屏蔽记录翻倍。
-        const filteredText = (getRaw: () => string): string => {
-          if (self.__bfbText === undefined) self.__bfbText = computeFilteredText(url2, getRaw());
-          return self.__bfbText;
-        };
-        if (dText && dText.get) {
-          Object.defineProperty(self, 'responseText', {
-            configurable: true,
-            get() {
-              if (self.readyState !== 4) return dText.get!.call(self);
-              return filteredText(() => dText.get!.call(self));
-            },
-          });
-          self.__bfbHooked = true;
-        }
-        if (dResp && dResp.get) {
-          Object.defineProperty(self, 'response', {
-            configurable: true,
-            get() {
-              if (self.readyState !== 4) return dResp.get!.call(self);
-              const rt = self.responseType;
-              // json 型只能读 .response（读 responseText 会抛错），单独 memo 一份对象
-              if (rt === 'json') {
-                if (self.__bfbResp === undefined) {
-                  const orig = dResp.get!.call(self);
-                  try {
-                    if (orig && typeof orig === 'object') NET.runJson(url2, orig); // 原地删项
-                    self.__bfbResp = orig;
-                  } catch (e) {
-                    self.__bfbResp = orig;
-                  }
-                }
-                return self.__bfbResp;
-              }
-              // text/'' 型：与 responseText 共用同一份文本 memo
-              if (rt === '' || rt === 'text') {
-                const orig = dResp.get!.call(self);
-                return typeof orig === 'string' ? filteredText(() => orig) : orig;
-              }
-              return dResp.get!.call(self);
-            },
-          });
-          self.__bfbHooked = true;
-        }
-      }
-      // 用改写后的 url2 调原始 open（保留 async/user/password 透传）
-      return origOpen.call(this, method, url2, async, user, password);
-    };
-    XHR.prototype.__bfb = true;
-  }
+  installXhrHooks(W, {
+    matches: isFilteredUrl,
+    rewrite: rewriteRequestUrl,
+    note: (url) => { health.noteRequest(url); if (isFeedUrl(url)) health.feedMatched++; },
+    context: homeRequestContext,
+    begin: (url) => {
+      const feed = isFeedUrl(url); if (feed) health.pendingResponses++;
+      return () => { if (feed) health.pendingResponses--; };
+    },
+    sync: (url, json, context) => discardStaleHomeFeed(json, context) ?? NET.runJson(url, json),
+    async: filterResponseJson,
+  });
 }

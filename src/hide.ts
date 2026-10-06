@@ -25,7 +25,6 @@ export function showEl(el: HTMLElement): void {
   h.__bfbDisp = null;
   if (!saved) {
     // 没存档 = 我们没藏过它。此时若内联上有 display 那是站点自己的，不能动。
-    if (h.style.getPropertyValue('display') === 'none') h.style.removeProperty('display');
     return;
   }
   if (saved.value) h.style.setProperty('display', saved.value, saved.priority);

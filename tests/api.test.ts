@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // gmRequest 桩：按 responses 队列依次应答，并记录实际发出的 URL（用来断言「有没有重发」）。
-const h = vi.hoisted(() => ({ responses: [] as any[], calls: [] as string[] }));
+const h = vi.hoisted(() => ({ responses: [] as any[], calls: [] as string[], toasts: [] as any[][] }));
 vi.mock('../src/gm', () => ({
   gmRequest: (opts: any) => {
     h.calls.push(opts.url);
@@ -19,9 +19,11 @@ vi.mock('../src/gm', () => ({
   },
 }));
 // 风控码会让 riskGuard 弹 toast，而 node 环境没有 document。
-vi.mock('../src/ui/toast', () => ({ toast: () => {}, updateBadge: () => {} }));
+vi.mock('../src/ui/toast', () => ({ toast: (...args: any[]) => h.toasts.push(args), updateBadge: () => {} }));
 
-import { fetchTags, fetchView, riskGuard } from '../src/api';
+import { fetchTags, fetchView, fetchCard, riskGuard } from '../src/api';
+import { CONFIG } from '../src/config';
+import { REQUEST_BUDGET_KEY } from '../src/constants';
 
 // 每个用例换一个 bvid：缓存是模块级单例，共用键会让用例互相污染。
 let seq = 0;
@@ -33,7 +35,7 @@ const tagsOk = (...names: string[]) => ({ code: 0, data: names.map((tag_name) =>
 function get(bvid: string): any {
   let out: any = 'NOT_CALLED';
   fetchTags(bvid, (d) => (out = d));
-  vi.advanceTimersByTime(200);
+  vi.advanceTimersByTime(1100);
   return out;
 }
 
@@ -41,10 +43,45 @@ beforeEach(() => {
   vi.useFakeTimers();
   h.responses.length = 0;
   h.calls.length = 0;
+  h.toasts.length = 0;
   riskGuard.until = 0;
   riskGuard.strikes = 0;
+  CONFIG.showRiskNotifications = true;
+  CONFIG.allowMetadataRequests = true;
+  CONFIG.apiFilters = true;
+  GM_setValue(REQUEST_BUDGET_KEY, '[]');
 });
 afterEach(() => vi.useRealTimers());
+
+describe('风控提醒开关', () => {
+  it('精确过滤总开关关闭时，即使曾授权补充取数也不自动请求', () => {
+    CONFIG.apiFilters = false; const cb = vi.fn(); fetchTags(nextBv(), cb);
+    expect(cb).toHaveBeenCalledWith(null); expect(h.calls).toHaveLength(0);
+  });
+  it('未授权额外取数时标签 / 详情 / UP 卡片不发请求，手动解析仍可进行', () => {
+    CONFIG.allowMetadataRequests = false;
+    const cb = vi.fn(); const bv = nextBv();
+    fetchTags(bv, cb); fetchView(bv, cb); fetchCard('unseen-local', cb);
+    expect(cb.mock.calls).toEqual([[null], [null], [null]]); expect(h.calls).toHaveLength(0);
+    h.responses.push({ code: 0, data: { owner: { mid: 11 }, staff: [{ mid: 12 }] } });
+    fetchView(bv, cb, undefined, true); vi.advanceTimersByTime(1100);
+    expect(h.calls).toHaveLength(1); expect(cb.mock.calls[3][0].staff).toEqual([{ mid: 12 }]);
+  });
+  it('渲染前有期限的取数在熔断/过期时直接返回，不堆积队列', () => {
+    riskGuard.until = Date.now() + 60000;
+    let out: any = 'waiting'; fetchTags(nextBv(), (d) => { out = d; }, Date.now() + 8000);
+    expect(out).toBeNull(); expect(h.calls).toHaveLength(0);
+    riskGuard.until = 0; out = 'waiting'; fetchTags(nextBv(), (d) => { out = d; }, Date.now() - 1);
+    expect(out).toBeNull(); expect(h.calls).toHaveLength(0);
+  });
+  it('只隐藏 Toast，不影响熔断退避', () => {
+    CONFIG.showRiskNotifications = false;
+    riskGuard.note(-352);
+    expect(h.toasts).toHaveLength(0);
+    expect(riskGuard.blocked()).toBe(true);
+    expect(riskGuard.strikes).toBe(1);
+  });
+});
 
 describe('fetchTags：成功结果长期缓存', () => {
   it('第二次不再发请求', () => {
@@ -94,7 +131,7 @@ describe('fetchTags：瞬时失败只压冷却，不永久化', () => {
     h.responses.push('neterr');
     let viewOut: any = 'NOT_CALLED';
     fetchView(bv, (d) => (viewOut = d));
-    vi.advanceTimersByTime(200);
+    vi.advanceTimersByTime(1100);
     expect(viewOut).toBeNull();
 
     h.responses.push(tagsOk('鬼畜'));

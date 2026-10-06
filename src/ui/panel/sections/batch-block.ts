@@ -80,7 +80,7 @@ export const batchBlockSection: PanelSection = {
               d.staff.forEach((s: { mid: number | string; name?: string }) => resolved.push({ uid: String(s.mid), name: s.name || '' }));
             }
             if (--pending === 0) runBlacklist(direct.concat(resolved));
-          });
+          }, undefined, true);
         });
       };
 

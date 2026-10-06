@@ -68,7 +68,7 @@ function resolveUidByBvid(bvid: string, cb: (uid: string, name: string) => void)
   fetchView(bvid, (d) => {
     if (d && d.owner) cb(String(d.owner.mid), d.owner.name || '');
     else cb('', '');
-  });
+  }, undefined, true);
 }
 
 // relation/modify 常见错误码 → 友好文案。
@@ -295,7 +295,7 @@ export function blacklistUp(info: BlockSource, cb?: (ok: boolean) => void, cardE
         toast(targets.length > 1 ? `联合投稿：已拉黑 ${ok}/${r.total} 位作者${r.failed.length ? `（失败 ${r.failed.length}）` : ''}` : `已拉黑：${targets[0].name || targets[0].uid}`);
         cb?.(ok > 0);
       });
-    });
+    }, undefined, true);
     return;
   }
   if (uid) {
