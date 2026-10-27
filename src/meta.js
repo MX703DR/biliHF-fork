@@ -1,6 +1,6 @@
 // UserScript 元数据（构建产物的头部）。版本号单一来源在此处维护。
 // scripts/build.mjs 会把 banner 原样 prepend 到打包产物 biliHoyoFairy.user.js。
-export const version = '0.0.12';
+export const version = '0.0.13';
 
 export const banner = `// ==UserScript==
 // @name         biliHoyoFairy-MX703
@@ -14,6 +14,7 @@ export const banner = `// ==UserScript==
 // @match        https://www.bilibili.com/*
 // @match        https://search.bilibili.com/*
 // @match        https://t.bilibili.com/*
+// @match        https://space.bilibili.com/*
 // @updateURL    https://raw.githubusercontent.com/MX703DR/biliHF-fork/main/biliHoyoFairy.user.js
 // @downloadURL  https://raw.githubusercontent.com/MX703DR/biliHF-fork/main/biliHoyoFairy.user.js
 // @connect      api.bilibili.com

@@ -3,13 +3,14 @@
 // @name:zh-CN   biliHoyoFairy-MX703
 // @name:en      biliHoyoFairy-MX703
 // @namespace    https://github.com/MX703DR/biliHF-fork
-// @version      0.0.12
+// @version      0.0.13
 // @description  B站(bilibili/哔哩哔哩)推荐流净化与屏蔽脚本：屏蔽黑流量、引战视频、商业广告与不想看的 UP 主。支持按 标签/UP主/UID/关键词(可正则)/分区/时长/播放量/BV 精准过滤；覆盖首页/热门/排行榜/搜索/播放页/动态/评论区；白名单优先防误伤；右键一键屏蔽/拉黑(同步账号黑名单)；内置预置关键词库与规则订阅。
 // @description:en  Clean up & block the bilibili recommendation feed: hide clickbait, flame-bait, ads and unwanted UP owners. Filter by tag/UP/UID/keyword(regex)/category/duration/views/BV across home, popular, ranking, search, video, dynamic pages and comments; whitelist priority; one-click block synced to the account blacklist; preset keyword library and rule subscriptions.
 // @author       gendu-amd
 // @match        https://www.bilibili.com/*
 // @match        https://search.bilibili.com/*
 // @match        https://t.bilibili.com/*
+// @match        https://space.bilibili.com/*
 // @updateURL    https://raw.githubusercontent.com/MX703DR/biliHF-fork/main/biliHoyoFairy.user.js
 // @downloadURL  https://raw.githubusercontent.com/MX703DR/biliHF-fork/main/biliHoyoFairy.user.js
 // @connect      api.bilibili.com
@@ -106,10 +107,14 @@
     "div.video-card-reco",
     "div.video-card-common",
     "div.bili-dyn-list__item",
-    // 动态信息流（t.bilibili.com）
+    // 动态信息流与个人空间动态（t / space.bilibili.com）
     "div.floor-card.single-card"
     // 首页信息流里的「直播推荐」单卡（链向 live.bilibili.com）
   ];
+  var DYNAMIC_CARD_SELECTOR = "div.bili-dyn-list__item";
+  var DYNAMIC_ITEM_SELECTOR = ".bili-dyn-item";
+  var DYNAMIC_AUTHOR_SELECTOR = ".bili-dyn-item__header";
+  var DYNAMIC_TEXT_SELECTOR = ".bili-dyn-content .bili-rich-text__content, .bili-dyn-content__orig__desc, .bili-dyn-card-video__title, .dyn-card-opus__title, .dyn-card-opus__summary";
   var VIDEO_PAGE_UP_BOX = ".up-info-container, .membersinfo-upcard, .up-detail, .video-info-container";
   var VIDEO_PAGE_UP_NAME = ".up-name, .up-name__text";
   var PAGE_HEADER_SELECTOR = ".bili-header, #biliMainHeader, #bili-header-container";
@@ -192,10 +197,9 @@
 
   // src/page.ts
   var IS_SEARCH = location.host === "search.bilibili.com";
-  var IS_DYNAMIC = location.host === "t.bilibili.com";
   function pageType() {
     const h = location.href;
-    if (IS_DYNAMIC) return "动态";
+    if (location.host === "t.bilibili.com" || location.host === "space.bilibili.com" && /^\/\d+\/dynamic(?:\/|$)/.test(location.pathname)) return "动态";
     if (h.includes("/v/popular/rank") || h.includes("/ranking")) return "排行榜";
     if (h.includes("/v/popular")) return "热门";
     if (IS_SEARCH) return "搜索页";
@@ -902,13 +906,32 @@
     return card._bfbInfo || null;
   }
   function extractCardInfo(card, deepUid = true) {
+    const isDynamic = card.matches(DYNAMIC_CARD_SELECTOR);
+    if (isDynamic) {
+      try {
+        const item = card.querySelector(DYNAMIC_ITEM_SELECTOR) || card;
+        const data = item.__vue__?.$props?.data || item.__vueParentComponent?.props?.data;
+        if (data?.id_str && data.modules && typeof data.type === "string" && data.type.startsWith("DYNAMIC_TYPE_")) {
+          const info2 = normDynamicItem(data);
+          if (info2) return info2;
+        }
+      } catch {
+      }
+    }
     const info = { title: "", up: "", uid: "", partition: "", bvid: "", duration: null, views: null, likes: null, isLive: false, isAd: false };
     info.title = pickText(card, CARD_TITLE_SELECTORS);
     info.up = pickText(card, CARD_UP_SELECTORS);
-    const upA = card.querySelector('a[href*="space.bilibili.com"]');
+    const authorScope = isDynamic ? card.querySelector(DYNAMIC_AUTHOR_SELECTOR) : null;
+    if (isDynamic) {
+      info.isDynamic = true;
+      if (authorScope) info.up = pickText(authorScope, [".bili-dyn-title__text", ...CARD_UP_SELECTORS]);
+      const texts = Array.from(card.querySelectorAll(DYNAMIC_TEXT_SELECTOR), (el) => (el.getAttribute("title") || el.textContent || "").trim()).filter(Boolean);
+      if (texts.length) info.title = [...new Set(texts)].join(" ");
+    }
+    const upA = (isDynamic ? authorScope : card)?.querySelector('a[href*="space.bilibili.com"]');
     if (upA) info.uid = ((upA.getAttribute("href") || "").match(/space\.bilibili\.com\/(\d+)/) || [])[1] || "";
     if (!info.uid) {
-      const midEl = card.querySelector(CARD_MID_ATTR_SELECTOR);
+      const midEl = (isDynamic ? authorScope : card)?.querySelector(CARD_MID_ATTR_SELECTOR);
       if (midEl) {
         for (const a of CARD_MID_ATTRS) {
           const v = midEl.getAttribute(a);
@@ -943,7 +966,7 @@
     const { detectAd } = getDetect();
     const text2 = card.textContent || "";
     info.isLive = !!(card.querySelector('a[href*="live.bilibili.com"]') || card.querySelector(LIVE_CARD_SELECTOR) || /直播中|正在直播/.test(text2));
-    if (!info.uid && deepUid && text2.trim()) {
+    if (!info.uid && !isDynamic && deepUid && text2.trim()) {
       const html = card.innerHTML;
       info.uid = (html.match(/space\.bilibili\.com\/(\d+)/) || [])[1] || "";
       if (!info.uid) info.uid = (html.match(/"(?:mid|owner_?id|up_?mid)"\s*:\s*"?(\d{2,})"?/) || [])[1] || "";
@@ -965,7 +988,7 @@
     const major = dyn.major || {};
     const av = major.archive || major.pgc || {};
     const stat = av.stat || {};
-    const title = av.title || dyn.desc && dyn.desc.text || "";
+    const title = [...new Set([av.title, dyn.desc?.text, major.opus?.title, major.opus?.summary?.text].filter((v) => typeof v === "string" && !!v.trim()))].join(" ");
     const orig = it.orig ? normDynamicItem(it.orig) : null;
     return {
       title: String(title || "") + (orig && orig.title ? " " + orig.title : ""),
@@ -2858,7 +2881,7 @@
       },
       lists: searchVideoSources
     },
-    // 动态流（t.bilibili.com）。此前这是唯一一个完全靠 DOM 兜底的主要页面——DOM 层只能在卡片
+    // 动态流与个人空间动态（t / space.bilibili.com）。DOM 层只能在卡片
     // 画出来之后再隐藏，且抠不到 UID 这类权威字段。接到拦截层后与首页同源同判。
     // 只删 data.items 里的项，不动 offset/has_more：分页游标由 B 站维护，改它会打乱后续加载。
     { re: /\/x\/polymer\/web-dynamic\/v1\/feed\/(all|space)/, get: (d) => d && Array.isArray(d.items) ? d.items : null, norm: normDynamicItem }

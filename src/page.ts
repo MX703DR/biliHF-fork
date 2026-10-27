@@ -4,11 +4,12 @@ import { CELL_CONTAINERS, UNSAFE_HIDE_CONTAINERS, VIDEO_CARD_SELECTORS } from '.
 import { PROCESSED } from './constants';
 
 const IS_SEARCH = location.host === 'search.bilibili.com';
-const IS_DYNAMIC = location.host === 't.bilibili.com';
 
 export function pageType(): string {
   const h = location.href;
-  if (IS_DYNAMIC) return '动态';
+  // 空间是 SPA：从 /uid 站内切到 /uid/dynamic 时不会重新加载脚本，不能在模块初始化时固定路径。
+  if (location.host === 't.bilibili.com' ||
+      (location.host === 'space.bilibili.com' && /^\/\d+\/dynamic(?:\/|$)/.test(location.pathname))) return '动态';
   if (h.includes('/v/popular/rank') || h.includes('/ranking')) return '排行榜';
   if (h.includes('/v/popular')) return '热门';
   if (IS_SEARCH) return '搜索页';

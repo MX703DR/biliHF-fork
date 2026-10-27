@@ -17,9 +17,14 @@ export const VIDEO_CARD_SELECTORS = [
   'li.rank-item', // 排行榜
   'div.video-card-reco',
   'div.video-card-common',
-  'div.bili-dyn-list__item', // 动态信息流（t.bilibili.com）
+  'div.bili-dyn-list__item', // 动态信息流与个人空间动态（t / space.bilibili.com）
   'div.floor-card.single-card', // 首页信息流里的「直播推荐」单卡（链向 live.bilibili.com）
 ];
+// 动态单卡的边界与正文，不能把评论正文/列表容器当成动态关键词。
+export const DYNAMIC_CARD_SELECTOR = 'div.bili-dyn-list__item';
+export const DYNAMIC_ITEM_SELECTOR = '.bili-dyn-item';
+export const DYNAMIC_AUTHOR_SELECTOR = '.bili-dyn-item__header';
+export const DYNAMIC_TEXT_SELECTOR = '.bili-dyn-content .bili-rich-text__content, .bili-dyn-content__orig__desc, .bili-dyn-card-video__title, .dyn-card-opus__title, .dyn-card-opus__summary';
 // BewlyCat 的卡片内层类名恰好也是 .video-card，上面那条已能命中；下面 CARD_* 里带 BewlyCat
 // 标注的几条补的是它的字段类名（否则卡认得出、标题和 UP 名却抠不到）。
 

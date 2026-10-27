@@ -67,7 +67,7 @@ export const FEED_HOOKS: FeedHook[] = [
     },
     lists: searchVideoSources,
   },
-  // 动态流（t.bilibili.com）。此前这是唯一一个完全靠 DOM 兜底的主要页面——DOM 层只能在卡片
+  // 动态流与个人空间动态（t / space.bilibili.com）。DOM 层只能在卡片
   // 画出来之后再隐藏，且抠不到 UID 这类权威字段。接到拦截层后与首页同源同判。
   // 只删 data.items 里的项，不动 offset/has_more：分页游标由 B 站维护，改它会打乱后续加载。
   { re: /\/x\/polymer\/web-dynamic\/v1\/feed\/(all|space)/, get: (d) => (d && Array.isArray(d.items) ? d.items : null), norm: normDynamicItem },

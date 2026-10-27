@@ -13,6 +13,10 @@ import {
   CARD_VIEWS_SELECTORS,
   CARD_LIKES_SELECTORS,
   LIVE_CARD_SELECTOR,
+  DYNAMIC_CARD_SELECTOR,
+  DYNAMIC_ITEM_SELECTOR,
+  DYNAMIC_AUTHOR_SELECTOR,
+  DYNAMIC_TEXT_SELECTOR,
 } from './selectors';
 
 // 归一后的卡片信息：DOM 抽取与接口归一两路同构。
@@ -68,16 +72,39 @@ export function cachedCardInfo(card: Element): CardInfo | null {
 }
 
 export function extractCardInfo(card: Element, deepUid = true): CardInfo {
+  const isDynamic = card.matches(DYNAMIC_CARD_SELECTOR);
+  if (isDynamic) {
+    // 空间的 dynlist 是 Vue 2，作者名字可点击却未必是链接；转发/正文 @ 链接也不是发布者。
+    // 只读该单卡自己的原始 props，不向上遍历列表/空间资料，也不请求 UP 详情；改版后走 DOM 兜底。
+    try {
+      const item = (card.querySelector(DYNAMIC_ITEM_SELECTOR) || card) as Element & {
+        __vue__?: { $props?: { data?: any } };
+        __vueParentComponent?: { props?: { data?: any } };
+      };
+      const data = item.__vue__?.$props?.data || item.__vueParentComponent?.props?.data;
+      if (data?.id_str && data.modules && typeof data.type === 'string' && data.type.startsWith('DYNAMIC_TYPE_')) {
+        const info = normDynamicItem(data);
+        if (info) return info;
+      }
+    } catch { /* 未知组件/属性访问失败时保留普通 DOM 路径。 */ }
+  }
   const info: CardInfo = { title: '', up: '', uid: '', partition: '', bvid: '', duration: null, views: null, likes: null, isLive: false, isAd: false };
 
   info.title = pickText(card, CARD_TITLE_SELECTORS);
   info.up = pickText(card, CARD_UP_SELECTORS);
+  const authorScope = isDynamic ? card.querySelector(DYNAMIC_AUTHOR_SELECTOR) : null;
+  if (isDynamic) {
+    info.isDynamic = true;
+    if (authorScope) info.up = pickText(authorScope, ['.bili-dyn-title__text', ...CARD_UP_SELECTORS]);
+    const texts = Array.from(card.querySelectorAll(DYNAMIC_TEXT_SELECTOR), el => (el.getAttribute('title') || el.textContent || '').trim()).filter(Boolean);
+    if (texts.length) info.title = [...new Set(texts)].join(' ');
+  }
 
   // UID（拉黑必需）：space 链接 → data-* → innerHTML 兜底（含纯文本卡内嵌的 "mid":数字）
-  const upA = card.querySelector('a[href*="space.bilibili.com"]');
+  const upA = (isDynamic ? authorScope : card)?.querySelector('a[href*="space.bilibili.com"]');
   if (upA) info.uid = ((upA.getAttribute('href') || '').match(/space\.bilibili\.com\/(\d+)/) || [])[1] || '';
   if (!info.uid) {
-    const midEl = card.querySelector(CARD_MID_ATTR_SELECTOR);
+    const midEl = (isDynamic ? authorScope : card)?.querySelector(CARD_MID_ATTR_SELECTOR);
     // 逐个短路取值（不用 map+find：这是每张卡都会走的热路径，别为一次取值分配临时数组）
     if (midEl) {
       for (const a of CARD_MID_ATTRS) {
@@ -129,7 +156,7 @@ export function extractCardInfo(card: Element, deepUid = true): CardInfo {
   // innerHTML 兜底要序列化整张卡，是本函数最贵的一步：只读一次，且骨架卡直接跳过。
   // 骨架卡不打 PROCESSED（要等填充后再判），每轮扫描都会重抽——不跳过就是每 250ms 一次全卡序列化 × N。
   // 判据用「一个字都没有」而非「有没有标题/UP」：标题选择器没覆盖到的版式其实是渲染好的。
-  if (!info.uid && deepUid && text.trim()) {
+  if (!info.uid && !isDynamic && deepUid && text.trim()) {
     const html = card.innerHTML;
     info.uid = (html.match(/space\.bilibili\.com\/(\d+)/) || [])[1] || '';
     if (!info.uid) info.uid = (html.match(/"(?:mid|owner_?id|up_?mid)"\s*:\s*"?(\d{2,})"?/) || [])[1] || '';
@@ -152,7 +179,7 @@ export function extractCardInfo(card: Element, deepUid = true): CardInfo {
   return info;
 }
 
-// 动态流（t.bilibili.com）的列表项归一。单独一个函数而不是塞进 normFeedItem：
+// 动态流与个人空间动态的列表项归一。单独一个函数而不是塞进 normFeedItem：
 // 动态的字段全埋在 modules 下，与推荐流那套扁平结构没有一处重合。
 // 非视频项（图文/转发）归一后没有 bvid/title 也无妨，关键词与 UP/UID 维度照样能判。
 export function normDynamicItem(it: any): CardInfo | null {
@@ -164,7 +191,9 @@ export function normDynamicItem(it: any): CardInfo | null {
   // 视频动态的正文在 major.archive；纯文字/图文动态在 module_dynamic.desc.text
   const av = major.archive || major.pgc || {};
   const stat = av.stat || {};
-  const title = av.title || (dyn.desc && dyn.desc.text) || '';
+  // 视频可带额外正文；新版 itemOpusStyle 图文正文在 opus.summary，不一定有 desc。
+  const title = [...new Set([av.title, dyn.desc?.text, major.opus?.title, major.opus?.summary?.text]
+    .filter((v): v is string => typeof v === 'string' && !!v.trim()))].join(' ');
   // 转发动态：原动态的正文也要参与关键词判定，否则「转发引战内容」拦不到
   const orig = it.orig ? normDynamicItem(it.orig) : null;
   return {
