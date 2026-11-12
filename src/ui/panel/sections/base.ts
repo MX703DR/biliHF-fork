@@ -19,6 +19,7 @@ export const baseSection: PanelSection = {
       <div class="switch"><input type="checkbox" id="bfb-rclick"> 右键卡片弹出菜单（屏蔽、拉黑、加入白名单）</div>
       <div class="switch"><input type="checkbox" id="bfb-invert-shift-rclick"> 反转 Shift+右键（普通右键显示原生菜单，Shift+右键显示插件菜单）</div>
       <div class="switch"><input type="checkbox" id="bfb-hoverbtn"> 悬停卡片显示快捷「拉黑 / 不看这个」按钮</div>
+      <label class="switch"><input type="checkbox" id="bfb-lock-badge"> 将悬浮按钮锁定在右下角（单行显示）</label>
       <div class="switch"><input type="checkbox" id="bfb-collab"> 联合投稿一并拉黑合作者</div>
       <div class="switch"><input type="checkbox" id="bfb-fuzzy"> 反绕过模糊匹配（「原 神」「原.神」同样拦截；隐形字符始终拦截）</div>
       <div class="switch"><input type="checkbox" id="bfb-trad"> 简繁归一（规则写「原神」也能拦住繁体标题；单向繁→简）</div>
@@ -35,6 +36,7 @@ export const baseSection: PanelSection = {
     bindControl(sw, 'bfb-rclick', CONFIG, 'rightClickBlock');
     bindControl(sw, 'bfb-invert-shift-rclick', CONFIG, 'invertShiftRightClick');
     bindControl(sw, 'bfb-hoverbtn', CONFIG, 'cardHoverBtn', { after: hideHoverBtn });
+    bindControl(sw, 'bfb-lock-badge', CONFIG, 'lockBadgePosition', { after: updateBadge });
     bindControl(sw, 'bfb-collab', CONFIG, 'blacklistCollab');
     bindControl(sw, 'bfb-fuzzy', CONFIG, 'fuzzyMatch', { after: rescanAfterRuleChange });
     bindControl(sw, 'bfb-trad', CONFIG, 'tradNorm', { after: rescanAfterRuleChange });

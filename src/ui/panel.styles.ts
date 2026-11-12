@@ -7,6 +7,9 @@
     .bfb-tag button{border:none;border-radius:6px;background:#fff;color:#1b7a3d;font-size:11px;padding:2px 6px;cursor:pointer;white-space:nowrap}
     #bfb-badge{position:fixed;right:18px;bottom:18px;z-index:99999;background:#fb7299;color:#fff;border-radius:24px;padding:8px 14px;font-size:13px;cursor:grab;box-shadow:0 4px 14px rgba(0,0,0,.2);font-family:system-ui,Arial;user-select:none;touch-action:none}
     #bfb-badge.dragging{cursor:grabbing;transition:none}
+    #bfb-badge.locked{left:auto!important;top:auto!important;right:18px!important;bottom:18px!important;width:max-content;max-width:calc(100vw - 36px);box-sizing:border-box;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;touch-action:manipulation}
+    /* BPX 常驻一个空举报容器；只有弹窗内容挂载且未被隐藏时才隐藏按钮。 */
+    body:has(.bpx-player-dm-report-wrap:not([hidden],[aria-hidden="true"],[style*="display:none"],[style*="display: none"]) > :not([hidden],[aria-hidden="true"],[style*="display:none"],[style*="display: none"])) #bfb-badge{visibility:hidden!important;pointer-events:none}
     #bfb-badge.off{background:#999}
     #bfb-badge.warn{background:#e67e22}
     #bfb-ctxmenu{position:fixed;z-index:100002;background:#fff;border:1px solid #ffd5e2;border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.22);overflow:hidden;min-width:210px;font-family:system-ui,Arial}

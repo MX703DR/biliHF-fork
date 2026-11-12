@@ -4,23 +4,27 @@ import { CONFIG } from '../config';
 import { healthDegraded } from '../health';
 import { sessionBlocked } from '../stats';
 import { openPanel } from './hooks';
-import { installBadgeDrag } from './badge-drag';
+import { installBadgeDrag, setBadgeLocked } from './badge-drag';
 
 export function updateBadge(): void {
+  // 独立设置入口只在顶层页面显示，避免弹幕举报等嵌入窗口出现重复按钮。
+  if (window !== window.top) return;
   let b = document.getElementById('bfb-badge');
   if (!b) {
     b = document.createElement('div');
     b.id = 'bfb-badge';
     document.body.appendChild(b);
-    installBadgeDrag(b, openPanel);
   }
   b.classList.toggle('off', !CONFIG.enabled);
   // 拦截管线疑似失效时角标变黄。不弹 toast——误报的代价是骚扰所有人，而变色是零打断的提示：
   // 平时粉的东西今天黄了，足以让人点开看一眼，这正是「静默失效」最缺的那一环。
   const degraded = CONFIG.enabled && healthDegraded();
   b.classList.toggle('warn', degraded);
-  b.title = degraded ? '⚠ 拦截可能已失效，点击查看运行自检；拖拽可移动' : '点击打开设置；拖拽可移动';
+  b.title = (degraded ? '⚠ 拦截可能已失效，点击查看运行自检' : '点击打开设置') +
+    (CONFIG.lockBadgePosition ? '；已锁定在右下角' : '；拖拽可移动');
   b.textContent = CONFIG.enabled ? `${degraded ? '⚠' : '🛡'} 已拦截 ${sessionBlocked}（共${CONFIG.blockedCount}）` : '🛡 已暂停';
+  installBadgeDrag(b, openPanel);
+  setBadgeLocked(b, CONFIG.lockBadgePosition);
 }
 
 function toastContainer(): HTMLElement {

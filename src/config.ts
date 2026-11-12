@@ -73,6 +73,7 @@ export interface AppConfig {
   rightClickBlock: boolean;
   invertShiftRightClick: boolean;
   cardHoverBtn: boolean;
+  lockBadgePosition: boolean;
   showNotifications: boolean;
   showRiskNotifications: boolean;
   fuzzyMatch: boolean;
@@ -111,6 +112,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   reviewMode: false, // 审查模式：被拦视频不删/不隐，而是标记+就地放行，便于核对防误伤
   rightClickBlock: true,
   invertShiftRightClick: false, // 默认 Shift+右键走原生菜单；开启后反转为普通右键原生、Shift+右键插件菜单
+  lockBadgePosition: false,
   cardHoverBtn: false, // 悬停卡片时显示快捷「拉黑」浮层按钮（独立浮层，不改 B 站卡片 DOM）
   showNotifications: true, // 页面轻提示总开关；危险操作确认框不受它影响
   showRiskNotifications: true, // 风控熔断仍始终生效；这里只控制是否弹 Toast

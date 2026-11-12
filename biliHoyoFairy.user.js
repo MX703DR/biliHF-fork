@@ -3,7 +3,7 @@
 // @name:zh-CN   biliHoyoFairy-MX703
 // @name:en      biliHoyoFairy-MX703
 // @namespace    https://github.com/MX703DR/biliHF-fork
-// @version      0.0.13
+// @version      0.0.14
 // @description  B站(bilibili/哔哩哔哩)推荐流净化与屏蔽脚本：屏蔽黑流量、引战视频、商业广告与不想看的 UP 主。支持按 标签/UP主/UID/关键词(可正则)/分区/时长/播放量/BV 精准过滤；覆盖首页/热门/排行榜/搜索/播放页/动态/评论区；白名单优先防误伤；右键一键屏蔽/拉黑(同步账号黑名单)；内置预置关键词库与规则订阅。
 // @description:en  Clean up & block the bilibili recommendation feed: hide clickbait, flame-bait, ads and unwanted UP owners. Filter by tag/UP/UID/keyword(regex)/category/duration/views/BV across home, popular, ranking, search, video, dynamic pages and comments; whitelist priority; one-click block synced to the account blacklist; preset keyword library and rule subscriptions.
 // @author       gendu-amd
@@ -398,6 +398,7 @@
     rightClickBlock: true,
     invertShiftRightClick: false,
     // 默认 Shift+右键走原生菜单；开启后反转为普通右键原生、Shift+右键插件菜单
+    lockBadgePosition: false,
     cardHoverBtn: false,
     // 悬停卡片时显示快捷「拉黑」浮层按钮（独立浮层，不改 B 站卡片 DOM）
     showNotifications: true,
@@ -1163,17 +1164,21 @@
     el.style.bottom = "auto";
     return p;
   }
+  var lockHandlers = /* @__PURE__ */ new WeakMap();
+  function setBadgeLocked(el, locked) {
+    lockHandlers.get(el)?.(locked);
+  }
   function installBadgeDrag(el, onClick) {
     if (el.dataset.bfbDrag === "1") return;
     el.dataset.bfbDrag = "1";
     el.setAttribute("role", "button");
     el.tabIndex = 0;
-    let positioned = false;
-    const stored = loadPosition();
-    if (stored) {
-      place(el, stored.left, stored.top);
-      positioned = true;
-    }
+    let position = loadPosition();
+    const restorePosition = () => {
+      if (position) place(el, position.left, position.top);
+      else for (const side of ["left", "top", "right", "bottom"]) el.style.removeProperty(side);
+    };
+    restorePosition();
     let pointerId = null;
     let startX = 0;
     let startY = 0;
@@ -1181,8 +1186,21 @@
     let offsetY = 0;
     let moved = false;
     let suppressClick = false;
+    const clearDrag = () => {
+      pointerId = null;
+      el.classList.remove("dragging");
+      el.removeAttribute("aria-grabbed");
+    };
+    lockHandlers.set(el, (locked) => {
+      if (el.classList.contains("locked") === locked) return;
+      el.classList.toggle("locked", locked);
+      const activePointer = pointerId;
+      clearDrag();
+      if (activePointer !== null && el.hasPointerCapture(activePointer)) el.releasePointerCapture(activePointer);
+      if (!locked) restorePosition();
+    });
     el.addEventListener("pointerdown", (e) => {
-      if (pointerId !== null || !e.isPrimary || e.button !== 0) return;
+      if (el.classList.contains("locked") || pointerId !== null || !e.isPrimary || e.button !== 0) return;
       const rect = el.getBoundingClientRect();
       pointerId = e.pointerId;
       startX = e.clientX;
@@ -1199,7 +1217,6 @@
       if (e.pointerId !== pointerId) return;
       if (!moved && Math.hypot(e.clientX - startX, e.clientY - startY) < DRAG_THRESHOLD) return;
       moved = true;
-      positioned = true;
       el.classList.add("dragging");
       el.setAttribute("aria-grabbed", "true");
       place(el, e.clientX - offsetX, e.clientY - offsetY);
@@ -1207,13 +1224,11 @@
     });
     const finish = (e) => {
       if (e.pointerId !== pointerId) return;
-      pointerId = null;
-      el.classList.remove("dragging");
-      el.removeAttribute("aria-grabbed");
+      clearDrag();
       if (!moved) return;
       const rect = el.getBoundingClientRect();
-      const p = place(el, rect.left, rect.top);
-      savePosition(p);
+      position = place(el, rect.left, rect.top);
+      savePosition(position);
       suppressClick = true;
       setTimeout(() => suppressClick = false, 0);
     };
@@ -1235,31 +1250,34 @@
     });
     let resizeTimer = null;
     window.addEventListener("resize", () => {
-      if (!positioned) return;
+      if (!position || el.classList.contains("locked")) return;
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         resizeTimer = null;
+        if (!position || el.classList.contains("locked") || pointerId !== null) return;
         const rect = el.getBoundingClientRect();
-        const p = place(el, rect.left, rect.top);
-        savePosition(p);
+        position = place(el, rect.left, rect.top);
+        savePosition(position);
       }, 150);
     });
   }
 
   // src/ui/toast.ts
   function updateBadge() {
+    if (window !== window.top) return;
     let b = document.getElementById("bfb-badge");
     if (!b) {
       b = document.createElement("div");
       b.id = "bfb-badge";
       document.body.appendChild(b);
-      installBadgeDrag(b, openPanel);
     }
     b.classList.toggle("off", !CONFIG.enabled);
     const degraded = CONFIG.enabled && healthDegraded();
     b.classList.toggle("warn", degraded);
-    b.title = degraded ? "⚠ 拦截可能已失效，点击查看运行自检；拖拽可移动" : "点击打开设置；拖拽可移动";
+    b.title = (degraded ? "⚠ 拦截可能已失效，点击查看运行自检" : "点击打开设置") + (CONFIG.lockBadgePosition ? "；已锁定在右下角" : "；拖拽可移动");
     b.textContent = CONFIG.enabled ? `${degraded ? "⚠" : "🛡"} 已拦截 ${sessionBlocked}（共${CONFIG.blockedCount}）` : "🛡 已暂停";
+    installBadgeDrag(b, openPanel);
+    setBadgeLocked(b, CONFIG.lockBadgePosition);
   }
   function toastContainer() {
     let c = document.getElementById("bfb-toasts");
@@ -5037,6 +5055,9 @@
     .bfb-tag button{border:none;border-radius:6px;background:#fff;color:#1b7a3d;font-size:11px;padding:2px 6px;cursor:pointer;white-space:nowrap}
     #bfb-badge{position:fixed;right:18px;bottom:18px;z-index:99999;background:#fb7299;color:#fff;border-radius:24px;padding:8px 14px;font-size:13px;cursor:grab;box-shadow:0 4px 14px rgba(0,0,0,.2);font-family:system-ui,Arial;user-select:none;touch-action:none}
     #bfb-badge.dragging{cursor:grabbing;transition:none}
+    #bfb-badge.locked{left:auto!important;top:auto!important;right:18px!important;bottom:18px!important;width:max-content;max-width:calc(100vw - 36px);box-sizing:border-box;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;touch-action:manipulation}
+    /* BPX 常驻一个空举报容器；只有弹窗内容挂载且未被隐藏时才隐藏按钮。 */
+    body:has(.bpx-player-dm-report-wrap:not([hidden],[aria-hidden="true"],[style*="display:none"],[style*="display: none"]) > :not([hidden],[aria-hidden="true"],[style*="display:none"],[style*="display: none"])) #bfb-badge{visibility:hidden!important;pointer-events:none}
     #bfb-badge.off{background:#999}
     #bfb-badge.warn{background:#e67e22}
     #bfb-ctxmenu{position:fixed;z-index:100002;background:#fff;border:1px solid #ffd5e2;border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.22);overflow:hidden;min-width:210px;font-family:system-ui,Arial}
@@ -5668,6 +5689,7 @@
       <div class="switch"><input type="checkbox" id="bfb-rclick"> 右键卡片弹出菜单（屏蔽、拉黑、加入白名单）</div>
       <div class="switch"><input type="checkbox" id="bfb-invert-shift-rclick"> 反转 Shift+右键（普通右键显示原生菜单，Shift+右键显示插件菜单）</div>
       <div class="switch"><input type="checkbox" id="bfb-hoverbtn"> 悬停卡片显示快捷「拉黑 / 不看这个」按钮</div>
+      <label class="switch"><input type="checkbox" id="bfb-lock-badge"> 将悬浮按钮锁定在右下角（单行显示）</label>
       <div class="switch"><input type="checkbox" id="bfb-collab"> 联合投稿一并拉黑合作者</div>
       <div class="switch"><input type="checkbox" id="bfb-fuzzy"> 反绕过模糊匹配（「原 神」「原.神」同样拦截；隐形字符始终拦截）</div>
       <div class="switch"><input type="checkbox" id="bfb-trad"> 简繁归一（规则写「原神」也能拦住繁体标题；单向繁→简）</div>
@@ -5684,6 +5706,7 @@
       bindControl(sw, "bfb-rclick", CONFIG, "rightClickBlock");
       bindControl(sw, "bfb-invert-shift-rclick", CONFIG, "invertShiftRightClick");
       bindControl(sw, "bfb-hoverbtn", CONFIG, "cardHoverBtn", { after: hideHoverBtn });
+      bindControl(sw, "bfb-lock-badge", CONFIG, "lockBadgePosition", { after: updateBadge });
       bindControl(sw, "bfb-collab", CONFIG, "blacklistCollab");
       bindControl(sw, "bfb-fuzzy", CONFIG, "fuzzyMatch", { after: rescanAfterRuleChange });
       bindControl(sw, "bfb-trad", CONFIG, "tradNorm", { after: rescanAfterRuleChange });

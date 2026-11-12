@@ -62,18 +62,23 @@ function place(el: HTMLElement, left: number, top: number): BadgePosition {
   return p;
 }
 
+const lockHandlers = new WeakMap<HTMLElement, (locked: boolean) => void>();
+export function setBadgeLocked(el: HTMLElement, locked: boolean): void {
+  lockHandlers.get(el)?.(locked);
+}
+
 export function installBadgeDrag(el: HTMLElement, onClick: () => void): void {
   if (el.dataset.bfbDrag === '1') return;
   el.dataset.bfbDrag = '1';
   el.setAttribute('role', 'button');
   el.tabIndex = 0;
 
-  let positioned = false;
-  const stored = loadPosition();
-  if (stored) {
-    place(el, stored.left, stored.top);
-    positioned = true;
-  }
+  let position = loadPosition();
+  const restorePosition = () => {
+    if (position) place(el, position.left, position.top);
+    else for (const side of ['left', 'top', 'right', 'bottom']) el.style.removeProperty(side);
+  };
+  restorePosition();
 
   let pointerId: number | null = null;
   let startX = 0;
@@ -82,9 +87,23 @@ export function installBadgeDrag(el: HTMLElement, onClick: () => void): void {
   let offsetY = 0;
   let moved = false;
   let suppressClick = false;
+  const clearDrag = () => {
+    pointerId = null;
+    el.classList.remove('dragging');
+    el.removeAttribute('aria-grabbed');
+  };
+
+  lockHandlers.set(el, (locked) => {
+    if (el.classList.contains('locked') === locked) return;
+    el.classList.toggle('locked', locked);
+    const activePointer = pointerId;
+    clearDrag();
+    if (activePointer !== null && el.hasPointerCapture(activePointer)) el.releasePointerCapture(activePointer);
+    if (!locked) restorePosition();
+  });
 
   el.addEventListener('pointerdown', (e: PointerEvent) => {
-    if (pointerId !== null || !e.isPrimary || e.button !== 0) return;
+    if (el.classList.contains('locked') || pointerId !== null || !e.isPrimary || e.button !== 0) return;
     const rect = el.getBoundingClientRect();
     pointerId = e.pointerId;
     startX = e.clientX;
@@ -103,7 +122,6 @@ export function installBadgeDrag(el: HTMLElement, onClick: () => void): void {
     if (e.pointerId !== pointerId) return;
     if (!moved && Math.hypot(e.clientX - startX, e.clientY - startY) < DRAG_THRESHOLD) return;
     moved = true;
-    positioned = true;
     el.classList.add('dragging');
     el.setAttribute('aria-grabbed', 'true');
     place(el, e.clientX - offsetX, e.clientY - offsetY);
@@ -112,13 +130,11 @@ export function installBadgeDrag(el: HTMLElement, onClick: () => void): void {
 
   const finish = (e: PointerEvent) => {
     if (e.pointerId !== pointerId) return;
-    pointerId = null;
-    el.classList.remove('dragging');
-    el.removeAttribute('aria-grabbed');
+    clearDrag();
     if (!moved) return;
     const rect = el.getBoundingClientRect();
-    const p = place(el, rect.left, rect.top);
-    savePosition(p);
+    position = place(el, rect.left, rect.top);
+    savePosition(position);
     suppressClick = true;
     // 浏览器会紧接着派发本次手势的 click；若没有派发，不能误吞用户下一次真正的点击。
     setTimeout(() => (suppressClick = false), 0);
@@ -143,13 +159,14 @@ export function installBadgeDrag(el: HTMLElement, onClick: () => void): void {
 
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
   window.addEventListener('resize', () => {
-    if (!positioned) return;
+    if (!position || el.classList.contains('locked')) return;
     if (resizeTimer) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
       resizeTimer = null;
+      if (!position || el.classList.contains('locked') || pointerId !== null) return;
       const rect = el.getBoundingClientRect();
-      const p = place(el, rect.left, rect.top);
-      savePosition(p);
+      position = place(el, rect.left, rect.top);
+      savePosition(position);
     }, 150);
   });
 }
