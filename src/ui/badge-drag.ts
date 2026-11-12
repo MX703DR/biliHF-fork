@@ -92,13 +92,16 @@ export function installBadgeDrag(el: HTMLElement, onClick: () => void): void {
     el.classList.remove('dragging');
     el.removeAttribute('aria-grabbed');
   };
+  const cancelDrag = () => {
+    const activePointer = pointerId;
+    clearDrag();
+    if (activePointer !== null && el.hasPointerCapture(activePointer)) el.releasePointerCapture(activePointer);
+  };
 
   lockHandlers.set(el, (locked) => {
     if (el.classList.contains('locked') === locked) return;
     el.classList.toggle('locked', locked);
-    const activePointer = pointerId;
-    clearDrag();
-    if (activePointer !== null && el.hasPointerCapture(activePointer)) el.releasePointerCapture(activePointer);
+    cancelDrag();
     if (!locked) restorePosition();
   });
 
@@ -157,16 +160,20 @@ export function installBadgeDrag(el: HTMLElement, onClick: () => void): void {
     onClick();
   });
 
-  let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+  let viewportWidth = window.innerWidth;
+  let viewportHeight = window.innerHeight;
   window.addEventListener('resize', () => {
-    if (!position || el.classList.contains('locked')) return;
-    if (resizeTimer) clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => {
-      resizeTimer = null;
-      if (!position || el.classList.contains('locked') || pointerId !== null) return;
-      const rect = el.getBoundingClientRect();
-      position = place(el, rect.left, rect.top);
-      savePosition(position);
-    }, 150);
+    if (viewportWidth === window.innerWidth && viewportHeight === window.innerHeight) return;
+    viewportWidth = window.innerWidth;
+    viewportHeight = window.innerHeight;
+    if (!position && pointerId === null) return;
+    cancelDrag();
+    const hadPosition = position !== null;
+    position = null;
+    restorePosition(); // 去掉拖拽用的坐标，让 CSS 重新贴右下角，不更改锁定开关。
+    if (hadPosition) {
+      try { GM_deleteValue(BADGE_POSITION_KEY); }
+      catch { /* 存储不可用时，至少完成本页复位。 */ }
+    }
   });
 }

@@ -3,7 +3,7 @@
 // @name:zh-CN   biliHoyoFairy-MX703
 // @name:en      biliHoyoFairy-MX703
 // @namespace    https://github.com/MX703DR/biliHF-fork
-// @version      0.0.14
+// @version      0.0.15
 // @description  B站(bilibili/哔哩哔哩)推荐流净化与屏蔽脚本：屏蔽黑流量、引战视频、商业广告与不想看的 UP 主。支持按 标签/UP主/UID/关键词(可正则)/分区/时长/播放量/BV 精准过滤；覆盖首页/热门/排行榜/搜索/播放页/动态/评论区；白名单优先防误伤；右键一键屏蔽/拉黑(同步账号黑名单)；内置预置关键词库与规则订阅。
 // @description:en  Clean up & block the bilibili recommendation feed: hide clickbait, flame-bait, ads and unwanted UP owners. Filter by tag/UP/UID/keyword(regex)/category/duration/views/BV across home, popular, ranking, search, video, dynamic pages and comments; whitelist priority; one-click block synced to the account blacklist; preset keyword library and rule subscriptions.
 // @author       gendu-amd
@@ -1191,12 +1191,15 @@
       el.classList.remove("dragging");
       el.removeAttribute("aria-grabbed");
     };
-    lockHandlers.set(el, (locked) => {
-      if (el.classList.contains("locked") === locked) return;
-      el.classList.toggle("locked", locked);
+    const cancelDrag = () => {
       const activePointer = pointerId;
       clearDrag();
       if (activePointer !== null && el.hasPointerCapture(activePointer)) el.releasePointerCapture(activePointer);
+    };
+    lockHandlers.set(el, (locked) => {
+      if (el.classList.contains("locked") === locked) return;
+      el.classList.toggle("locked", locked);
+      cancelDrag();
       if (!locked) restorePosition();
     });
     el.addEventListener("pointerdown", (e) => {
@@ -1248,17 +1251,23 @@
       e.preventDefault();
       onClick();
     });
-    let resizeTimer = null;
+    let viewportWidth = window.innerWidth;
+    let viewportHeight = window.innerHeight;
     window.addEventListener("resize", () => {
-      if (!position || el.classList.contains("locked")) return;
-      if (resizeTimer) clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => {
-        resizeTimer = null;
-        if (!position || el.classList.contains("locked") || pointerId !== null) return;
-        const rect = el.getBoundingClientRect();
-        position = place(el, rect.left, rect.top);
-        savePosition(position);
-      }, 150);
+      if (viewportWidth === window.innerWidth && viewportHeight === window.innerHeight) return;
+      viewportWidth = window.innerWidth;
+      viewportHeight = window.innerHeight;
+      if (!position && pointerId === null) return;
+      cancelDrag();
+      const hadPosition = position !== null;
+      position = null;
+      restorePosition();
+      if (hadPosition) {
+        try {
+          GM_deleteValue(BADGE_POSITION_KEY);
+        } catch {
+        }
+      }
     });
   }
 
