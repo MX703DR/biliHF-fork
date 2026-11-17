@@ -3,7 +3,7 @@
 // @name:zh-CN   biliHoyoFairy-MX703
 // @name:en      biliHoyoFairy-MX703
 // @namespace    https://github.com/MX703DR/biliHF-fork
-// @version      0.0.15
+// @version      0.0.16
 // @description  B站(bilibili/哔哩哔哩)推荐流净化与屏蔽脚本：屏蔽黑流量、引战视频、商业广告与不想看的 UP 主。支持按 标签/UP主/UID/关键词(可正则)/分区/时长/播放量/BV 精准过滤；覆盖首页/热门/排行榜/搜索/播放页/动态/评论区；白名单优先防误伤；右键一键屏蔽/拉黑(同步账号黑名单)；内置预置关键词库与规则订阅。
 // @description:en  Clean up & block the bilibili recommendation feed: hide clickbait, flame-bait, ads and unwanted UP owners. Filter by tag/UP/UID/keyword(regex)/category/duration/views/BV across home, popular, ranking, search, video, dynamic pages and comments; whitelist priority; one-click block synced to the account blacklist; preset keyword library and rule subscriptions.
 // @author       gendu-amd
@@ -4577,6 +4577,51 @@
     page(1);
   }
 
+  // src/home-feedback.ts
+  function findNativeHomeFeedback(root, card, bvid) {
+    const seen = /* @__PURE__ */ new Set();
+    const walk = (node) => {
+      if (!node || typeof node !== "object" || seen.has(node)) return;
+      seen.add(node);
+      const props = node.props;
+      if (node.el === card && node.type?.name === "BiliVideoCard" && props?.info?.bvid === bvid && props.info.goto === "av" && props.info.dislike_switch && typeof props.onClickNointerest === "function") return props;
+      const subtree = walk(node.component?.subTree) || walk(node.suspense?.activeBranch);
+      if (subtree) return subtree;
+      if (Array.isArray(node.children)) for (const child of node.children) {
+        const match = walk(child);
+        if (match) return match;
+      }
+    };
+    return walk(root);
+  }
+  var sentCards = /* @__PURE__ */ new WeakMap();
+  function sendHomeBlockFeedback(card, bvid) {
+    try {
+      if (location.hostname !== "www.bilibili.com" || location.pathname !== "/" || !card.isConnected || !/^BV[0-9A-Za-z]+$/.test(bvid) || sentCards.get(card) === bvid || riskGuard.blocked() || !getCookie("bili_jct")) return;
+      const href = card.querySelector('a[href*="/video/"]')?.getAttribute("href");
+      if (href?.match(/\/video\/(BV[0-9A-Za-z]+)(?=[/?#]|$)/)?.[1] !== bvid) return;
+      for (const root of document.querySelectorAll("#app, #i_cecream")) {
+        const nativeRoot = root;
+        const native = findNativeHomeFeedback(nativeRoot._vnode ?? nativeRoot.__vue_app__?._container?._vnode, card, bvid);
+        if (!native?.onClickNointerest) continue;
+        sentCards.set(card, bvid);
+        for (const option of [
+          { text: "内容不感兴趣", value: 1, reason: 1 },
+          { text: "不想看此UP主", value: 2, reason: 4 }
+        ]) {
+          try {
+            void Promise.resolve(native.onClickNointerest(option)).catch((e) => logErr("首页屏蔽反馈", e));
+          } catch (e) {
+            logErr("首页屏蔽反馈", e);
+          }
+        }
+        return;
+      }
+    } catch (e) {
+      logErr("首页屏蔽反馈", e);
+    }
+  }
+
   // src/ui/menu/locate.ts
   function elementOf(t) {
     return t instanceof Element ? t : null;
@@ -4861,8 +4906,8 @@
       items.push({
         label: `🚫 屏蔽 UP「${up}」`,
         act: () => {
-          if (info.uid) addToList(CONFIG.block.uids, info.uid);
-          else addToList(CONFIG.block.upNames, up);
+          const added = info.uid ? addToList(CONFIG.block.uids, info.uid) : addToList(CONFIG.block.upNames, up);
+          if (added) sendHomeBlockFeedback(card, info.bvid);
           toast(`已屏蔽 UP：${up}`);
           refreshPanelIfOpen();
         }
@@ -4871,7 +4916,9 @@
         label: `⛔ 拉黑 UP「${up}」（同步账号黑名单）`,
         act: () => {
           confirmBlacklist(up).then((ok) => {
-            if (ok) blacklistUp(info, refreshPanelIfOpen, card);
+            if (!ok) return;
+            sendHomeBlockFeedback(card, info.bvid);
+            blacklistUp(info, refreshPanelIfOpen, card);
           });
         }
       });
@@ -4889,7 +4936,7 @@
       items.push({
         label: `🚫 屏蔽此视频（${bvid}）`,
         act: () => {
-          addToList(CONFIG.block.bvids, bvid);
+          if (addToList(CONFIG.block.bvids, bvid)) sendHomeBlockFeedback(card, bvid);
           toast(`已屏蔽视频：${bvid}`);
           refreshPanelIfOpen();
         }
@@ -4966,6 +5013,7 @@
       }
       confirmBlacklist(label).then((ok) => {
         if (!ok) return;
+        sendHomeBlockFeedback(card, info.bvid);
         blacklistUp(info, refreshPanelIfOpen, card);
         hideHoverBtn();
       });
@@ -4986,6 +5034,7 @@
         return;
       }
       if (addToList(CONFIG.block.bvids, bvid)) {
+        sendHomeBlockFeedback(hoverCard, bvid);
         toast(`已隐藏这个视频：${info.title || bvid}`, "success", { label: "撤销", onClick: () => removeFromList(CONFIG.block.bvids, bvid) });
       } else {
         toast("该视频此前已隐藏");

@@ -5,6 +5,7 @@ import { extractCardInfo } from '../../cardinfo';
 import { readCmt } from '../../comments';
 import { blockVideo } from '../../dom';
 import { blacklistUp } from '../../blacklist';
+import { sendHomeBlockFeedback } from '../../home-feedback';
 import { addToList } from '../../rules';
 import { toast } from '../toast';
 import { refreshPanelIfOpen, openPanel } from '../hooks';
@@ -170,8 +171,8 @@ export function onContextMenu(e: MouseEvent): void {
     items.push({
       label: `🚫 屏蔽 UP「${up}」`,
       act: () => {
-        if (info.uid) addToList(CONFIG.block.uids, info.uid);
-        else addToList(CONFIG.block.upNames, up);
+        const added = info.uid ? addToList(CONFIG.block.uids, info.uid) : addToList(CONFIG.block.upNames, up);
+        if (added) sendHomeBlockFeedback(card, info.bvid);
         toast(`已屏蔽 UP：${up}`);
         refreshPanelIfOpen();
       },
@@ -180,7 +181,9 @@ export function onContextMenu(e: MouseEvent): void {
       label: `⛔ 拉黑 UP「${up}」（同步账号黑名单）`,
       act: () => {
         confirmBlacklist(up).then((ok) => {
-          if (ok) blacklistUp(info, refreshPanelIfOpen, card);
+          if (!ok) return;
+          sendHomeBlockFeedback(card, info.bvid);
+          blacklistUp(info, refreshPanelIfOpen, card);
         });
       },
     });
@@ -198,7 +201,7 @@ export function onContextMenu(e: MouseEvent): void {
     items.push({
       label: `🚫 屏蔽此视频（${bvid}）`,
       act: () => {
-        addToList(CONFIG.block.bvids, bvid);
+        if (addToList(CONFIG.block.bvids, bvid)) sendHomeBlockFeedback(card, bvid);
         toast(`已屏蔽视频：${bvid}`);
         refreshPanelIfOpen();
       },
