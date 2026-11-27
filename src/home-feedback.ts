@@ -3,6 +3,7 @@
 import { logErr } from './logging';
 import { getCookie } from './util';
 import { riskGuard } from './api';
+import { isBilibiliHome } from './page';
 
 interface NativeFeedback {
   info: { bvid: string; goto: string; dislike_switch?: boolean | number };
@@ -31,7 +32,7 @@ const sentCards = new WeakMap<Element, string>();
 
 export function sendHomeBlockFeedback(card: Element, bvid: string): void {
   try {
-    if (location.hostname !== 'www.bilibili.com' || location.pathname !== '/' || !card.isConnected ||
+    if (!isBilibiliHome() || !card.isConnected ||
         !/^BV[0-9A-Za-z]+$/.test(bvid) || sentCards.get(card) === bvid || riskGuard.blocked() || !getCookie('bili_jct')) return;
     // 确认菜单打开之后卡片没有被换一换或 Vue 复用为另一稿件。
     const href = card.querySelector('a[href*="/video/"]')?.getAttribute('href');

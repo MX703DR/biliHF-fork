@@ -12,6 +12,7 @@ import { ruleVersion } from './match/engine';
 import { replayInitialVideoSearch } from './initial-search';
 import { HOME_RECOMMEND_CONTAINER, SEARCH_VIDEO_CONTAINER, VIDEO_CARD_SELECTORS } from './selectors';
 import { observeInitialMetadata } from './metadata-cache';
+import { isBilibiliHome } from './page';
 
 const pendingContainers = new Map<string, number>();
 const observedStates = new WeakMap<object, number>();
@@ -104,7 +105,7 @@ export function installInitialStateHooks(onReady: () => void): void {
       if (!needsGate) { filterInitialState(state); return; }
       const started = Date.now();
       const pageKey = location.pathname + location.search;
-      const home = location.hostname === 'www.bilibili.com' && location.pathname === '/';
+      const home = isBilibiliHome();
       const container = home ? HOME_RECOMMEND_CONTAINER : location.hostname === 'search.bilibili.com' ? SEARCH_VIDEO_CONTAINER : VIDEO_CARD_SELECTORS.join(',');
       pendingContainers.set(container, (pendingContainers.get(container) || 0) + 1);
       const style = document.createElement('style');

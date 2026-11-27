@@ -6,6 +6,7 @@ import { advanceHomeFeedEpoch } from './net';
 import { canResetHomeFeedView, resetHomeFeedView } from './home-grid';
 import { HOME_ROLL_BUTTON, HOME_FULL_REFRESH } from './selectors';
 import { toast } from './ui/toast';
+import { isBilibiliHome } from './page';
 
 export const WEB_CHANGE = 3;
 export const WEB_LOAD_MORE = 4;
@@ -113,7 +114,7 @@ function nativeFeed(): any {
 
 export function installHomeRefresh(): void {
   const W: any = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const isHome = () => location.hostname === 'www.bilibili.com' && location.pathname === '/';
+  const isHome = isBilibiliHome;
   let running = false;
   const refresh = async (loadMore = false) => {
     const feed = nativeFeed();

@@ -3,7 +3,7 @@
 // @name:zh-CN   biliHoyoFairy-MX703
 // @name:en      biliHoyoFairy-MX703
 // @namespace    https://github.com/MX703DR/biliHF-fork
-// @version      0.0.17
+// @version      0.0.18
 // @description  B站(bilibili/哔哩哔哩)推荐流净化与屏蔽脚本：屏蔽黑流量、引战视频、商业广告与不想看的 UP 主。支持按 标签/UP主/UID/关键词(可正则)/分区/时长/播放量/BV 精准过滤；覆盖首页/热门/排行榜/搜索/播放页/动态/评论区；白名单优先防误伤；右键一键屏蔽/拉黑(同步账号黑名单)；内置预置关键词库与规则订阅。
 // @description:en  Clean up & block the bilibili recommendation feed: hide clickbait, flame-bait, ads and unwanted UP owners. Filter by tag/UP/UID/keyword(regex)/category/duration/views/BV across home, popular, ranking, search, video, dynamic pages and comments; whitelist priority; one-click block synced to the account blacklist; preset keyword library and rule subscriptions.
 // @author       gendu-amd
@@ -197,13 +197,16 @@
 
   // src/page.ts
   var IS_SEARCH = location.host === "search.bilibili.com";
+  function isBilibiliHome() {
+    return location.hostname === "www.bilibili.com" && (location.pathname === "/" || location.pathname === "/index.html");
+  }
   function pageType() {
     const h = location.href;
     if (location.host === "t.bilibili.com" || location.host === "space.bilibili.com" && /^\/\d+\/dynamic(?:\/|$)/.test(location.pathname)) return "动态";
     if (h.includes("/v/popular/rank") || h.includes("/ranking")) return "排行榜";
     if (h.includes("/v/popular")) return "热门";
     if (IS_SEARCH) return "搜索页";
-    if (/^https:\/\/www\.bilibili\.com\/?($|\?|#)/.test(h)) return "首页";
+    if (isBilibiliHome()) return "首页";
     if (h.includes("/video/")) return "播放页";
     return "其他";
   }
@@ -3050,7 +3053,7 @@
   function advanceHomeFeedEpoch() {
     homeFeedEpoch++;
   }
-  var homeRequestContext = (url) => RCMD_RE.test(url) && location.hostname === "www.bilibili.com" && location.pathname === "/" ? homeFeedEpoch : void 0;
+  var homeRequestContext = (url) => RCMD_RE.test(url) && isBilibiliHome() ? homeFeedEpoch : void 0;
   function discardStaleHomeFeed(json, context, note = true) {
     if (typeof context !== "number" || context === homeFeedEpoch) return null;
     if (note && json?.code === 0 && Array.isArray(json.data?.item)) health.feedParsed++;
@@ -3283,7 +3286,7 @@
         }
         const started = Date.now();
         const pageKey = location.pathname + location.search;
-        const home = location.hostname === "www.bilibili.com" && location.pathname === "/";
+        const home = isBilibiliHome();
         const container = home ? HOME_RECOMMEND_CONTAINER : location.hostname === "search.bilibili.com" ? SEARCH_VIDEO_CONTAINER : VIDEO_CARD_SELECTORS.join(",");
         pendingContainers.set(container, (pendingContainers.get(container) || 0) + 1);
         const style = document.createElement("style");
@@ -3380,6 +3383,7 @@
   var isSkeleton = (props) => props?.skeleton === true || props?.skeleton === "";
   var cloneChildren = (node, children2) => ({ ...node, children: children2, dynamicChildren: null, patchFlag: -2 });
   function blocked(item) {
+    if (!CONFIG.enabled || CONFIG.reviewMode) return false;
     const info = normFeedItem(item);
     if (!info) return false;
     const v = dataVerdict(info.bvid, info.title, info.uid) || immediateVerdict(info);
@@ -3393,7 +3397,6 @@
     return true;
   }
   function adaptHomeRender(tree, videoTemplate) {
-    if (!CONFIG.enabled || CONFIG.reviewMode) return tree;
     let template = videoTemplate;
     const floorTypes = /* @__PURE__ */ new Set();
     const discover = (node) => {
@@ -3416,7 +3419,7 @@
       if (!node || typeof node !== "object" || !node.__v_isVNode) return node;
       const p = node.props;
       if (p?.info?.isFloor) floorTypes.add(node.type);
-      if (isSkeleton(p) && template && floorTypes.has(node.type)) {
+      if (CONFIG.enabled && !CONFIG.reviewMode && isSkeleton(p) && template && floorTypes.has(node.type)) {
         return {
           ...template,
           key: node.key,
@@ -3564,7 +3567,7 @@
     }
   }
   function installHomeGrid() {
-    if (location.hostname !== "www.bilibili.com" || location.pathname !== "/") return;
+    if (!isBilibiliHome()) return;
     const watched = /* @__PURE__ */ new WeakSet();
     const inspect = () => {
       for (const root of document.querySelectorAll("#app, #i_cecream")) {
@@ -3694,7 +3697,7 @@
   }
   function installHomeRefresh() {
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-    const isHome = () => location.hostname === "www.bilibili.com" && location.pathname === "/";
+    const isHome = isBilibiliHome;
     let running = false;
     const refresh = async (loadMore = false) => {
       const feed = nativeFeed();
@@ -4601,7 +4604,7 @@
   var sentCards = /* @__PURE__ */ new WeakMap();
   function sendHomeBlockFeedback(card, bvid) {
     try {
-      if (location.hostname !== "www.bilibili.com" || location.pathname !== "/" || !card.isConnected || !/^BV[0-9A-Za-z]+$/.test(bvid) || sentCards.get(card) === bvid || riskGuard.blocked() || !getCookie("bili_jct")) return;
+      if (!isBilibiliHome() || !card.isConnected || !/^BV[0-9A-Za-z]+$/.test(bvid) || sentCards.get(card) === bvid || riskGuard.blocked() || !getCookie("bili_jct")) return;
       const href = card.querySelector('a[href*="/video/"]')?.getAttribute("href");
       if (href?.match(/\/video\/(BV[0-9A-Za-z]+)(?=[/?#]|$)/)?.[1] !== bvid) return;
       for (const root of document.querySelectorAll("#app, #i_cecream")) {

@@ -44,10 +44,25 @@ describe('首页渲染模型适配', () => {
     expect(out.props.info.list).toEqual([second]); expect(out.props.info.displayItem).toBe(second);
     expect(info.list).toEqual([first, second]);
   });
-  it('暂停 / 审查模式不改变原生渲染树', () => {
+  it('暂停 / 审查模式保留原生卡片并使插槽更新生效', () => {
     const root = node('div', {}, [bone(), anchor()]);
-    CONFIG.enabled = false; expect(adaptHomeRender(root)).toBe(root);
-    CONFIG.enabled = true; CONFIG.reviewMode = true; expect(adaptHomeRender(root)).toBe(root);
+    CONFIG.enabled = false; expect(adaptHomeRender(root).children[1].children[0].type).toBe(floor);
+    CONFIG.enabled = true; CONFIG.reviewMode = true; expect(adaptHomeRender(root).children[1].children[0].type).toBe(floor);
+  });
+  it('屏蔽后开启审查，旧插槽闭包也必须恢复同一视频；关闭审查后再次隐藏', () => {
+    CONFIG.block.keywords.push('屏蔽'); rebuildRules();
+    const card = node(video, {info:{title:'屏蔽',bvid:'BVtest'}});
+    const root = node({}, {}, {default:()=>[card],_:1,$stable:true});
+    const adapted = adaptHomeRender(root);
+    expect(adapted.children.default()).toEqual([]);
+    CONFIG.reviewMode = true;
+    expect(adapted.children.default()[0].props.info.bvid).toBe('BVtest');
+    const reviewed = adaptHomeRender(root);
+    expect(reviewed.children._).toBe(2);
+    expect(reviewed.children.$stable).toBeUndefined();
+    expect(reviewed.children.default()[0].props.info.bvid).toBe('BVtest');
+    CONFIG.reviewMode = false;
+    expect(reviewed.children.default()).toEqual([]);
   });
   it('刷新只替换原生推荐组件的 key，保留类型/props/ref，并在首次 render 前装上过滤', () => {
     const type={__name:'RecommendContainer_FloorAside'};let original=0,filter=0;

@@ -5,6 +5,7 @@ import { normFeedItem } from './cardinfo';
 import { dataVerdict, immediateVerdict } from './video-filter';
 import { recordBlock } from './stats';
 import { logErr } from './logging';
+import { isBilibiliHome } from './page';
 
 const NAMES = new Set(['RecommendContainer_FloorAside', 'RecommendContainer_Overseas']);
 const adapters = new Set<any>();
@@ -17,6 +18,8 @@ const isSkeleton = (props: any) => props?.skeleton === true || props?.skeleton =
 const cloneChildren = (node: any, children: any) => ({ ...node, children, dynamicChildren: null, patchFlag: -2 });
 
 function blocked(item: any): boolean {
+  // Vue 可能继续调用上一轮保存的插槽闭包，必须按调用时的模式判定。
+  if (!CONFIG.enabled || CONFIG.reviewMode) return false;
   const info = normFeedItem(item);
   if (!info) return false;
   const v = dataVerdict(info.bvid, info.title, info.uid) || immediateVerdict(info);
@@ -32,7 +35,6 @@ function blocked(item: any): boolean {
 
 /** 保留哨兵的 DOM、ref 和 IntersectionObserver，不能直接删除它或把它挪到网格之外。 */
 export function adaptHomeRender(tree: any, videoTemplate?: any): any {
-  if (!CONFIG.enabled || CONFIG.reviewMode) return tree;
   let template = videoTemplate;
   const floorTypes = new Set<any>();
   const discover = (node: any) => {
@@ -53,7 +55,7 @@ export function adaptHomeRender(tree: any, videoTemplate?: any): any {
     const p = node.props;
     // actual floor 类型可以从 info.isFloor 识别；骨架类型从同一棵树的哨兵识别。
     if (p?.info?.isFloor) floorTypes.add(node.type);
-    if (isSkeleton(p) && template && floorTypes.has(node.type)) {
+    if (CONFIG.enabled && !CONFIG.reviewMode && isSkeleton(p) && template && floorTypes.has(node.type)) {
       return { ...template, key: node.key, props: { skeleton: true, animation: p.animation },
         scopeId: node.scopeId, slotScopeIds: node.slotScopeIds,
         ref: null, el: null, component: null, children: null, dynamicChildren: null, patchFlag: -2 };
@@ -177,7 +179,7 @@ export function refreshHomeGrid(): void {
 
 /** 捕捉 Vue 在 root 上发布 app 的同一个微任务；安装后立即重绘，避免 250ms DOM 轮询。 */
 export function installHomeGrid(): void {
-  if (location.hostname !== 'www.bilibili.com' || location.pathname !== '/') return;
+  if (!isBilibiliHome()) return;
   const watched = new WeakSet<Element>();
   const inspect = () => {
     for (const root of document.querySelectorAll('#app, #i_cecream')) {

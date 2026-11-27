@@ -10,6 +10,7 @@ import { dataVerdict, evaluateVideo, FILTER_WAIT_MS, immediateVerdict } from './
 import { filterCommentJson, isCommentUrl } from './comment-data';
 import { installXhrHooks } from './net-xhr';
 import { isMetadataUrl, observeMetadata } from './metadata-cache';
+import { isBilibiliHome } from './page';
 
 // 接口注册：re=URL 匹配，get=从 data 里取出可过滤的数组（就地 splice 即生效）。
 // norm=把该接口的列表项归一成 CardInfo；不填则用 normFeedItem（推荐流那套扁平字段）。
@@ -237,7 +238,7 @@ const RCMD_RE = /\/x\/web-interface\/(wbi\/)?index\/top\/feed\/rcmd/;
 let homeFeedEpoch = 0;
 export function advanceHomeFeedEpoch(): void { homeFeedEpoch++; }
 const homeRequestContext = (url: string): number | undefined =>
-  RCMD_RE.test(url) && location.hostname === 'www.bilibili.com' && location.pathname === '/' ? homeFeedEpoch : undefined;
+  RCMD_RE.test(url) && isBilibiliHome() ? homeFeedEpoch : undefined;
 
 function discardStaleHomeFeed(json: any, context: unknown, note = true): number | null {
   if (typeof context !== 'number' || context === homeFeedEpoch) return null;

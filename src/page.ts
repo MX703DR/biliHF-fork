@@ -5,6 +5,10 @@ import { PROCESSED } from './constants';
 
 const IS_SEARCH = location.host === 'search.bilibili.com';
 
+export function isBilibiliHome(): boolean {
+  return location.hostname === 'www.bilibili.com' && (location.pathname === '/' || location.pathname === '/index.html');
+}
+
 export function pageType(): string {
   const h = location.href;
   // 空间是 SPA：从 /uid 站内切到 /uid/dynamic 时不会重新加载脚本，不能在模块初始化时固定路径。
@@ -13,7 +17,7 @@ export function pageType(): string {
   if (h.includes('/v/popular/rank') || h.includes('/ranking')) return '排行榜';
   if (h.includes('/v/popular')) return '热门';
   if (IS_SEARCH) return '搜索页';
-  if (/^https:\/\/www\.bilibili\.com\/?($|\?|#)/.test(h)) return '首页';
+  if (isBilibiliHome()) return '首页';
   if (h.includes('/video/')) return '播放页';
   return '其他';
 }
