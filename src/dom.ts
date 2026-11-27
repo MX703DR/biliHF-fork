@@ -258,6 +258,13 @@ export function inspectChangedCard(node: Node, seen?: Set<HTMLElement>): void {
   seen?.add(card);
   const old = cachedCardInfo(card);
   if (!old) { processCard(card); return; }
+  // 原生 Vue 重绘可能删除我们追加的标签/重置 class，但卡片内容和 PROCESSED 没变。
+  // 这种情况不能被下方“信息没变就不重判”的优化跳过；观察器会在绘制前补回审查标记。
+  if (CONFIG.reviewMode && card.hasAttribute(ATTR_BLOCKED) &&
+      (!card.classList.contains('bfb-review') || !card.querySelector(':scope > .bfb-tag'))) {
+    processCard(card);
+    return;
+  }
   const info = extractCardInfo(card, M.needUid);
   if (!info.title && !info.up && !info.isLive) { processCard(card, true); return; }
   if (info.title && (info.bvid !== old.bvid || info.title !== old.title || info.up !== old.up)) processCard(card, true);
