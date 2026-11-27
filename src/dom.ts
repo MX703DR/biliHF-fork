@@ -20,6 +20,7 @@ import { hideEl, showEl } from './hide';
 import { toast } from './ui/toast';
 import { refreshPanelIfOpen } from './ui/hooks';
 import { refreshHomeGrid } from './home-grid';
+import { scheduleHomeReview } from './home-review';
 
 const countedEls = new WeakMap<Element, string>(); // 节点复用为另一视频时仍要计数
 const recognizedCards = new WeakSet<HTMLElement>();
@@ -40,6 +41,7 @@ function queueVerdict(result: Promise<VideoVerdict>, apply: (reason: string | nu
     Promise.all(batch.map((job) => job.result.catch(() => ({ reason: null, info: job.info })))).then((results) => {
       // 一轮新增节点的判定一起提交，不能逐张“放行后又被其它卡补位”。
       results.forEach((v, index) => batch[index].apply(v.reason, v.info));
+      scheduleHomeReview(markCard);
     });
   });
 }
@@ -289,6 +291,7 @@ function queryAllRoots(selector: string): HTMLElement[] {
 
 export function scanAll(): void {
   if (!CONFIG.enabled) return;
+  scheduleHomeReview(markCard);
   // 只取**未处理**的卡：稳态下页面上绝大多数卡都已处理，把它们全取回来再逐个 getAttribute
   // 是每 250ms 白做一遍的活。语义不变（已处理的本来就会被跳过），只是让选择器引擎代劳。
   const cards = timed('scan.query', () => queryAllRoots(UNPROCESSED_CARD_SELECTOR));
@@ -318,4 +321,5 @@ export function rescanAfterRuleChange(): void {
   });
   scanAll();
   scanComments(); // ruleVersion 已自增，评论会按新规则重判
+  scheduleHomeReview(markCard);
 }

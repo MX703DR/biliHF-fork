@@ -5,6 +5,7 @@ import { extractCardInfo, cachedCardInfo } from '../../cardinfo';
 import type { CardInfo } from '../../cardinfo';
 import { blacklistUp } from '../../blacklist';
 import { sendHomeBlockFeedback } from '../../home-feedback';
+import { rememberHomeReviewCard } from '../../home-review';
 import { addToList, removeFromList } from '../../rules';
 import { toast } from '../toast';
 import { refreshPanelIfOpen } from '../hooks';
@@ -66,6 +67,7 @@ function ensureHoverBtns(): HoverBtns {
     }
     confirmBlacklist(label).then((ok) => {
       if (!ok) return;
+      rememberHomeReviewCard(card, info);
       sendHomeBlockFeedback(card, info.bvid);
       blacklistUp(info, refreshPanelIfOpen, card);
       hideHoverBtn();
@@ -89,6 +91,7 @@ function ensureHoverBtns(): HoverBtns {
       return;
     }
     if (addToList(CONFIG.block.bvids, bvid)) {
+      rememberHomeReviewCard(hoverCard, info);
       sendHomeBlockFeedback(hoverCard, bvid);
       toast(`已隐藏这个视频：${info.title || bvid}`, 'success', { label: '撤销', onClick: () => removeFromList(CONFIG.block.bvids, bvid) });
     } else {

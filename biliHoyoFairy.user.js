@@ -3,7 +3,7 @@
 // @name:zh-CN   biliHoyoFairy-MX703
 // @name:en      biliHoyoFairy-MX703
 // @namespace    https://github.com/MX703DR/biliHF-fork
-// @version      0.0.18
+// @version      0.0.19
 // @description  B站(bilibili/哔哩哔哩)推荐流净化与屏蔽脚本：屏蔽黑流量、引战视频、商业广告与不想看的 UP 主。支持按 标签/UP主/UID/关键词(可正则)/分区/时长/播放量/BV 精准过滤；覆盖首页/热门/排行榜/搜索/播放页/动态/评论区；白名单优先防误伤；右键一键屏蔽/拉黑(同步账号黑名单)；内置预置关键词库与规则订阅。
 // @description:en  Clean up & block the bilibili recommendation feed: hide clickbait, flame-bait, ads and unwanted UP owners. Filter by tag/UP/UID/keyword(regex)/category/duration/views/BV across home, popular, ranking, search, video, dynamic pages and comments; whitelist priority; one-click block synced to the account blacklist; preset keyword library and rule subscriptions.
 // @author       gendu-amd
@@ -3965,6 +3965,83 @@
     return off;
   }
 
+  // src/home-review.ts
+  var recent = /* @__PURE__ */ new Map();
+  var MAX_RECENT = 40;
+  function rememberHomeReviewCard(card, info) {
+    if (!isBilibiliHome() || !card.isConnected || !/^BV[0-9A-Za-z]+$/.test(info.bvid)) return;
+    const image = card.querySelector(".bili-video-card__image img, .bili-video-card__cover img");
+    const cover = image?.currentSrc || image?.src || "";
+    recent.delete(info.bvid);
+    recent.set(info.bvid, { info: { ...info }, cover: /^https:\/\/[\w.-]+\.hdslb\.com\//i.test(cover) ? cover : "" });
+    if (recent.size > MAX_RECENT) recent.delete(recent.keys().next().value);
+  }
+  var section;
+  var revision = "";
+  var scheduled = false;
+  function scheduleHomeReview(mark) {
+    if (!CONFIG.enabled || !CONFIG.reviewMode || !isBilibiliHome()) {
+      section?.remove();
+      section = void 0;
+      revision = "";
+      return;
+    }
+    if (!recent.size || scheduled) return;
+    scheduled = true;
+    requestAnimationFrame(() => {
+      scheduled = false;
+      if (!CONFIG.enabled || !CONFIG.reviewMode || !isBilibiliHome()) return;
+      const visible = /* @__PURE__ */ new Set();
+      for (const card of document.querySelectorAll(".bfb-review")) {
+        const bvid = cachedCardInfo(card)?.bvid;
+        if (bvid && recent.has(bvid) && card.getClientRects().length && getComputedStyle(card).visibility === "visible") visible.add(bvid);
+      }
+      const missing = [...recent.values()].reverse().flatMap(({ info, cover }) => {
+        const reason = !visible.has(info.bvid) && matchRule(info);
+        return reason ? [{ info, cover, reason }] : [];
+      });
+      if (!missing.length) {
+        section?.remove();
+        return;
+      }
+      const key = JSON.stringify(missing);
+      if (key === revision && section?.isConnected) return;
+      revision = key;
+      section ??= document.createElement("section");
+      section.id = "bfb-home-review";
+      const heading = document.createElement("h2");
+      heading.textContent = "最近屏蔽的视频";
+      const list = document.createElement("div");
+      list.className = "bfb-home-review-list";
+      for (const { info, cover, reason } of missing) {
+        const card = document.createElement("article");
+        card.className = "bfb-home-review-card";
+        const link = document.createElement("a");
+        link.href = "https://www.bilibili.com/video/" + info.bvid + "/";
+        if (cover) {
+          const img = document.createElement("img");
+          img.alt = "";
+          img.src = cover;
+          link.append(img);
+        }
+        const title = document.createElement("strong");
+        title.textContent = info.title || info.bvid;
+        link.append(title);
+        const author = document.createElement("span");
+        author.textContent = info.up;
+        card.append(link, author);
+        mark(card, reason, info);
+        list.append(card);
+      }
+      section.replaceChildren(heading, list);
+      if (!section.isConnected) {
+        const grid = document.querySelector(HOME_RECOMMEND_CONTAINER);
+        if (grid) grid.before(section);
+        else document.body?.prepend(section);
+      }
+    });
+  }
+
   // src/dom.ts
   var countedEls = /* @__PURE__ */ new WeakMap();
   var recognizedCards = /* @__PURE__ */ new WeakSet();
@@ -3983,6 +4060,7 @@
       domBatch = [];
       Promise.all(batch.map((job) => job.result.catch(() => ({ reason: null, info: job.info })))).then((results) => {
         results.forEach((v, index) => batch[index].apply(v.reason, v.info));
+        scheduleHomeReview(markCard);
       });
     });
   }
@@ -4199,6 +4277,7 @@
   }
   function scanAll() {
     if (!CONFIG.enabled) return;
+    scheduleHomeReview(markCard);
     const cards = timed("scan.query", () => queryAllRoots(UNPROCESSED_CARD_SELECTOR));
     if (cards.length > health.cardsSeen) health.cardsSeen = cards.length;
     timed(
@@ -4222,6 +4301,7 @@
     });
     scanAll();
     scanComments();
+    scheduleHomeReview(markCard);
   }
 
   // src/scanner.ts
@@ -4914,7 +4994,10 @@
         label: `🚫 屏蔽 UP「${up}」`,
         act: () => {
           const added = info.uid ? addToList(CONFIG.block.uids, info.uid) : addToList(CONFIG.block.upNames, up);
-          if (added) sendHomeBlockFeedback(card, info.bvid);
+          if (added) {
+            rememberHomeReviewCard(card, info);
+            sendHomeBlockFeedback(card, info.bvid);
+          }
           toast(`已屏蔽 UP：${up}`);
           refreshPanelIfOpen();
         }
@@ -4924,6 +5007,7 @@
         act: () => {
           confirmBlacklist(up).then((ok) => {
             if (!ok) return;
+            rememberHomeReviewCard(card, info);
             sendHomeBlockFeedback(card, info.bvid);
             blacklistUp(info, refreshPanelIfOpen, card);
           });
@@ -4943,7 +5027,10 @@
       items.push({
         label: `🚫 屏蔽此视频（${bvid}）`,
         act: () => {
-          if (addToList(CONFIG.block.bvids, bvid)) sendHomeBlockFeedback(card, bvid);
+          if (addToList(CONFIG.block.bvids, bvid)) {
+            rememberHomeReviewCard(card, info);
+            sendHomeBlockFeedback(card, bvid);
+          }
           toast(`已屏蔽视频：${bvid}`);
           refreshPanelIfOpen();
         }
@@ -5020,6 +5107,7 @@
       }
       confirmBlacklist(label).then((ok) => {
         if (!ok) return;
+        rememberHomeReviewCard(card, info);
         sendHomeBlockFeedback(card, info.bvid);
         blacklistUp(info, refreshPanelIfOpen, card);
         hideHoverBtn();
@@ -5041,6 +5129,7 @@
         return;
       }
       if (addToList(CONFIG.block.bvids, bvid)) {
+        rememberHomeReviewCard(hoverCard, info);
         sendHomeBlockFeedback(hoverCard, bvid);
         toast(`已隐藏这个视频：${info.title || bvid}`, "success", { label: "撤销", onClick: () => removeFromList(CONFIG.block.bvids, bvid) });
       } else {
@@ -5113,6 +5202,12 @@
 
   // src/ui/panel.styles.ts
   GM_addStyle(`
+    #bfb-home-review{margin:0 auto 20px;padding:12px 16px;max-width:1400px;color:var(--text1,inherit)}
+    #bfb-home-review h2{margin:0 0 12px;font-size:16px}
+    .bfb-home-review-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,220px),1fr));gap:12px}
+    .bfb-home-review-card{padding:35px 10px 10px;border-radius:8px}
+    .bfb-home-review-card a,.bfb-home-review-card span{display:block;overflow-wrap:anywhere}
+    .bfb-home-review-card img{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:5px;margin-bottom:6px}
     .bfb-gutter-fix > *{margin-right:0 !important}
     .bfb-review{outline:2px solid #fb7299 !important;outline-offset:-2px;border-radius:8px;position:relative !important}
     .bfb-tag{position:absolute;top:6px;left:6px;z-index:9;display:flex;align-items:center;gap:6px;background:rgba(251,114,153,.95);color:#fff;border-radius:8px;padding:3px 6px;font-size:11px;font-family:system-ui,Arial;box-shadow:0 2px 6px rgba(0,0,0,.25)}
