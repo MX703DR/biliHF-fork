@@ -16,6 +16,7 @@ interface Slot {
 interface ReviewEntry {
   info: CardInfo;
   slots: Slot[];
+  attempted: boolean;
   restored?: HTMLElement;
 }
 
@@ -45,7 +46,7 @@ export function rememberHomeReviewCard(card: Element, info: CardInfo): void {
   if (!slots.length) return;
   old?.restored?.remove();
   entries.delete(info.bvid);
-  entries.set(info.bvid, { info: { ...info }, slots });
+  entries.set(info.bvid, { info: { ...info }, slots, attempted: old?.attempted ?? false });
   if (entries.size > 100) {
     const first = entries.keys().next().value!;
     entries.get(first)?.restored?.remove();
@@ -61,6 +62,7 @@ export function scheduleHomeReview(mark: (card: HTMLElement, reason: string, inf
     for (const entry of entries.values()) {
       entry.restored?.remove();
       entry.restored = undefined;
+      entry.attempted = false;
     }
     return;
   }
@@ -83,7 +85,8 @@ export function scheduleHomeReview(mark: (card: HTMLElement, reason: string, inf
         entry.restored = undefined;
         continue;
       }
-      if (entry.restored?.isConnected) continue;
+      // 外部移除也保留本轮的恢复记录，否则每次 DOM 扫描都会重插同一张卡。
+      if (entry.attempted) continue;
       const restored = slot.template.cloneNode(true) as HTMLElement;
       const card = slot === entry.slots[0] ? restored : restored.querySelector<HTMLElement>('.bili-video-card');
       if (!card) continue;
@@ -102,6 +105,7 @@ export function scheduleHomeReview(mark: (card: HTMLElement, reason: string, inf
       const { parent, next, previous, index } = slot;
       const anchor = next?.parentElement === parent ? next :
         previous?.parentElement === parent ? previous.nextElementSibling : parent.children[index] || null;
+      entry.attempted = true;
       parent.insertBefore(restored, anchor);
       entry.restored = restored;
     }

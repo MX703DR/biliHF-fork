@@ -26,6 +26,7 @@ const countedEls = new WeakMap<Element, string>(); // 节点复用为另一视�
 const recognizedCards = new WeakSet<HTMLElement>();
 let recognizedCount = 0;
 const pendingCards = new WeakMap<HTMLElement, object>();
+const repairedReview = new WeakMap<HTMLElement, string>();
 const waitingVisuals = new WeakMap<HTMLElement, { value: string; priority: string }>();
 let domBatch: Array<{ result: Promise<VideoVerdict>; apply: (reason: string | null, info: CardInfo) => void; info: CardInfo }> = [];
 let batchQueued = false;
@@ -266,8 +267,12 @@ export function inspectChangedCard(node: Node, seen?: Set<HTMLElement>): void {
   // 这种情况不能被下方“信息没变就不重判”的优化跳过；观察器会在绘制前补回审查标记。
   if (CONFIG.reviewMode && card.hasAttribute(ATTR_BLOCKED) &&
       (!card.classList.contains('bfb-review') || !card.querySelector(':scope > .bfb-tag'))) {
-    processCard(card);
-    return;
+    const repairKey = JSON.stringify([ruleVersion, old.bvid, old.title, old.up]);
+    if (repairedReview.get(card) !== repairKey) {
+      repairedReview.set(card, repairKey);
+      processCard(card);
+      return;
+    }
   }
   const info = extractCardInfo(card, M.needUid);
   if (!info.title && !info.up && !info.isLive) { processCard(card, true); return; }

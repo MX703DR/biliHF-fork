@@ -3,7 +3,7 @@
 // @name:zh-CN   biliHoyoFairy-MX703
 // @name:en      biliHoyoFairy-MX703
 // @namespace    https://github.com/MX703DR/biliHF-fork
-// @version      0.0.20
+// @version      0.0.21
 // @description  B站(bilibili/哔哩哔哩)推荐流净化与屏蔽脚本：屏蔽黑流量、引战视频、商业广告与不想看的 UP 主。支持按 标签/UP主/UID/关键词(可正则)/分区/时长/播放量/BV 精准过滤；覆盖首页/热门/排行榜/搜索/播放页/动态/评论区；白名单优先防误伤；右键一键屏蔽/拉黑(同步账号黑名单)；内置预置关键词库与规则订阅。
 // @description:en  Clean up & block the bilibili recommendation feed: hide clickbait, flame-bait, ads and unwanted UP owners. Filter by tag/UP/UID/keyword(regex)/category/duration/views/BV across home, popular, ranking, search, video, dynamic pages and comments; whitelist priority; one-click block synced to the account blacklist; preset keyword library and rule subscriptions.
 // @author       gendu-amd
@@ -3994,7 +3994,7 @@
     if (!slots.length) return;
     old?.restored?.remove();
     entries2.delete(info.bvid);
-    entries2.set(info.bvid, { info: { ...info }, slots });
+    entries2.set(info.bvid, { info: { ...info }, slots, attempted: old?.attempted ?? false });
     if (entries2.size > 100) {
       const first = entries2.keys().next().value;
       entries2.get(first)?.restored?.remove();
@@ -4008,6 +4008,7 @@
       for (const entry of entries2.values()) {
         entry.restored?.remove();
         entry.restored = void 0;
+        entry.attempted = false;
       }
       return;
     }
@@ -4030,7 +4031,7 @@
           entry.restored = void 0;
           continue;
         }
-        if (entry.restored?.isConnected) continue;
+        if (entry.attempted) continue;
         const restored = slot.template.cloneNode(true);
         const card = slot === entry.slots[0] ? restored : restored.querySelector(".bili-video-card");
         if (!card) continue;
@@ -4047,6 +4048,7 @@
         mark(card, reason, entry.info);
         const { parent, next, previous, index } = slot;
         const anchor = next?.parentElement === parent ? next : previous?.parentElement === parent ? previous.nextElementSibling : parent.children[index] || null;
+        entry.attempted = true;
         parent.insertBefore(restored, anchor);
         entry.restored = restored;
       }
@@ -4058,6 +4060,7 @@
   var recognizedCards = /* @__PURE__ */ new WeakSet();
   var recognizedCount = 0;
   var pendingCards = /* @__PURE__ */ new WeakMap();
+  var repairedReview = /* @__PURE__ */ new WeakMap();
   var waitingVisuals = /* @__PURE__ */ new WeakMap();
   var domBatch = [];
   var batchQueued = false;
@@ -4265,8 +4268,12 @@
       return;
     }
     if (CONFIG.reviewMode && card.hasAttribute(ATTR_BLOCKED) && (!card.classList.contains("bfb-review") || !card.querySelector(":scope > .bfb-tag"))) {
-      processCard(card);
-      return;
+      const repairKey = JSON.stringify([ruleVersion, old.bvid, old.title, old.up]);
+      if (repairedReview.get(card) !== repairKey) {
+        repairedReview.set(card, repairKey);
+        processCard(card);
+        return;
+      }
     }
     const info = extractCardInfo(card, M.needUid);
     if (!info.title && !info.up && !info.isLive) {
