@@ -1,11 +1,5 @@
 // 设置面板样式：作为 import 的副作用注入（与 v0.0.5 一致——启动即注入，不等面板打开）。
   GM_addStyle(`
-    #bfb-home-review{margin:0 auto 20px;padding:12px 16px;max-width:1400px;color:var(--text1,inherit)}
-    #bfb-home-review h2{margin:0 0 12px;font-size:16px}
-    .bfb-home-review-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,220px),1fr));gap:12px}
-    .bfb-home-review-card{padding:35px 10px 10px;border-radius:8px}
-    .bfb-home-review-card a,.bfb-home-review-card span{display:block;overflow-wrap:anywhere}
-    .bfb-home-review-card img{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:5px;margin-bottom:6px}
     .bfb-gutter-fix > *{margin-right:0 !important}
     .bfb-review{outline:2px solid #fb7299 !important;outline-offset:-2px;border-radius:8px;position:relative !important}
     .bfb-tag{position:absolute;top:6px;left:6px;z-index:9;display:flex;align-items:center;gap:6px;background:rgba(251,114,153,.95);color:#fff;border-radius:8px;padding:3px 6px;font-size:11px;font-family:system-ui,Arial;box-shadow:0 2px 6px rgba(0,0,0,.25)}

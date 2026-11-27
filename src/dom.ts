@@ -20,7 +20,7 @@ import { hideEl, showEl } from './hide';
 import { toast } from './ui/toast';
 import { refreshPanelIfOpen } from './ui/hooks';
 import { refreshHomeGrid } from './home-grid';
-import { scheduleHomeReview } from './home-review';
+import { isRestoredHomeReviewCard, rememberHomeReviewCard, scheduleHomeReview } from './home-review';
 
 const countedEls = new WeakMap<Element, string>(); // 节点复用为另一视频时仍要计数
 const recognizedCards = new WeakSet<HTMLElement>();
@@ -164,6 +164,7 @@ export function blockVideo(card: HTMLElement, reason: string, info: CardInfo): v
   if (CONFIG.reviewMode) {
     markCard(card, reason, info);
   } else {
+    rememberHomeReviewCard(card, info);
     // 隐藏统一走 hide.ts：文档级 class 到不了影子树（评论宿主、界面替换类扩展的卡片都在里面），
     // 而直接 removeProperty 恢复会删掉站点自己的 display。详见该文件。
     const cell = cellOf(card) as HTMLElement;
@@ -180,7 +181,7 @@ export function blockVideo(card: HTMLElement, reason: string, info: CardInfo): v
 
 // 单卡处理用错误边界包裹：异形卡导致 extractCardInfo/matchRule 抛错时，只跳过这一张、不中断整轮扫描。
 const processCard = safe('processCard', function (card: HTMLElement, fresh = false) {
-  if (!CONFIG.enabled) return;
+  if (!CONFIG.enabled || isRestoredHomeReviewCard(card)) return;
   if (isInitialStatePending(card)) return;
   let info = extractCardInfo(card, M.needUid);
   if (!info.title && !info.up && !info.isLive) {
@@ -232,6 +233,7 @@ const processCard = safe('processCard', function (card: HTMLElement, fresh = fal
   };
   const known = dataVerdict(info.bvid, info.title, info.uid) || immediateVerdict(info);
   if (known) {
+    if (displayed && known.reason && !CONFIG.reviewMode) rememberHomeReviewCard(card, info);
     if (!displayed && !CONFIG.reviewMode) waitForVerdict(card);
     queueVerdict(Promise.resolve(known), apply, info);
     return;

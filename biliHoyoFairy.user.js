@@ -3,7 +3,7 @@
 // @name:zh-CN   biliHoyoFairy-MX703
 // @name:en      biliHoyoFairy-MX703
 // @namespace    https://github.com/MX703DR/biliHF-fork
-// @version      0.0.19
+// @version      0.0.20
 // @description  B站(bilibili/哔哩哔哩)推荐流净化与屏蔽脚本：屏蔽黑流量、引战视频、商业广告与不想看的 UP 主。支持按 标签/UP主/UID/关键词(可正则)/分区/时长/播放量/BV 精准过滤；覆盖首页/热门/排行榜/搜索/播放页/动态/评论区；白名单优先防误伤；右键一键屏蔽/拉黑(同步账号黑名单)；内置预置关键词库与规则订阅。
 // @description:en  Clean up & block the bilibili recommendation feed: hide clickbait, flame-bait, ads and unwanted UP owners. Filter by tag/UP/UID/keyword(regex)/category/duration/views/BV across home, popular, ranking, search, video, dynamic pages and comments; whitelist priority; one-click block synced to the account blacklist; preset keyword library and rule subscriptions.
 // @author       gendu-amd
@@ -3884,9 +3884,9 @@
   }
 
   // src/rules.ts
-  function addEntries(entries2) {
+  function addEntries(entries3) {
     const byArr = /* @__PURE__ */ new Map();
-    for (const e of entries2) {
+    for (const e of entries3) {
       const v = (e.value ? String(e.value) : "").trim();
       if (!v) continue;
       const list = byArr.get(e.arr);
@@ -3901,9 +3901,9 @@
     }
     return n;
   }
-  function removeEntries(entries2) {
+  function removeEntries(entries3) {
     const byArr = /* @__PURE__ */ new Map();
-    for (const e of entries2) {
+    for (const e of entries3) {
       let set = byArr.get(e.arr);
       if (!set) byArr.set(e.arr, set = /* @__PURE__ */ new Set());
       set.add(String(e.value));
@@ -3966,78 +3966,89 @@
   }
 
   // src/home-review.ts
-  var recent = /* @__PURE__ */ new Map();
-  var MAX_RECENT = 40;
-  function rememberHomeReviewCard(card, info) {
-    if (!isBilibiliHome() || !card.isConnected || !/^BV[0-9A-Za-z]+$/.test(info.bvid)) return;
-    const image = card.querySelector(".bili-video-card__image img, .bili-video-card__cover img");
-    const cover = image?.currentSrc || image?.src || "";
-    recent.delete(info.bvid);
-    recent.set(info.bvid, { info: { ...info }, cover: /^https:\/\/[\w.-]+\.hdslb\.com\//i.test(cover) ? cover : "" });
-    if (recent.size > MAX_RECENT) recent.delete(recent.keys().next().value);
+  var entries2 = /* @__PURE__ */ new Map();
+  var restoredCards = /* @__PURE__ */ new WeakSet();
+  var isRestoredHomeReviewCard = (card) => restoredCards.has(card);
+  function videoLink(bvid) {
+    return `a[href*="/video/${bvid}/"],a[href$="/video/${bvid}"],a[href*="/video/${bvid}?"]`;
   }
-  var section;
-  var revision = "";
+  function rememberHomeReviewCard(card, info) {
+    if (!isBilibiliHome() || !(card instanceof HTMLElement) || !card.isConnected || !/^BV[0-9A-Za-z]+$/.test(info.bvid) || !card.querySelector(videoLink(info.bvid)) || restoredCards.has(card)) return;
+    const cell = cellOf(card);
+    if (isUnsafeHideTarget(cell)) return;
+    const old = entries2.get(info.bvid);
+    if (old?.slots[0].original === card) return;
+    const slots = [];
+    for (let el = card; el?.parentElement; el = el.parentElement) {
+      const parent = el.parentElement;
+      slots.push({
+        original: el,
+        parent,
+        previous: el.previousElementSibling,
+        next: el.nextElementSibling,
+        index: Array.from(parent.children).indexOf(el),
+        template: el.cloneNode(true)
+      });
+      if (el === cell) break;
+    }
+    if (!slots.length) return;
+    old?.restored?.remove();
+    entries2.delete(info.bvid);
+    entries2.set(info.bvid, { info: { ...info }, slots });
+    if (entries2.size > 100) {
+      const first = entries2.keys().next().value;
+      entries2.get(first)?.restored?.remove();
+      entries2.delete(first);
+    }
+  }
   var scheduled = false;
   function scheduleHomeReview(mark) {
+    if (!entries2.size) return;
     if (!CONFIG.enabled || !CONFIG.reviewMode || !isBilibiliHome()) {
-      section?.remove();
-      section = void 0;
-      revision = "";
+      for (const entry of entries2.values()) {
+        entry.restored?.remove();
+        entry.restored = void 0;
+      }
       return;
     }
-    if (!recent.size || scheduled) return;
+    if (scheduled) return;
     scheduled = true;
     requestAnimationFrame(() => {
       scheduled = false;
       if (!CONFIG.enabled || !CONFIG.reviewMode || !isBilibiliHome()) return;
-      const visible = /* @__PURE__ */ new Set();
-      for (const card of document.querySelectorAll(".bfb-review")) {
-        const bvid = cachedCardInfo(card)?.bvid;
-        if (bvid && recent.has(bvid) && card.getClientRects().length && getComputedStyle(card).visibility === "visible") visible.add(bvid);
-      }
-      const missing = [...recent.values()].reverse().flatMap(({ info, cover }) => {
-        const reason = !visible.has(info.bvid) && matchRule(info);
-        return reason ? [{ info, cover, reason }] : [];
-      });
-      if (!missing.length) {
-        section?.remove();
-        return;
-      }
-      const key = JSON.stringify(missing);
-      if (key === revision && section?.isConnected) return;
-      revision = key;
-      section ??= document.createElement("section");
-      section.id = "bfb-home-review";
-      const heading = document.createElement("h2");
-      heading.textContent = "最近屏蔽的视频";
-      const list = document.createElement("div");
-      list.className = "bfb-home-review-list";
-      for (const { info, cover, reason } of missing) {
-        const card = document.createElement("article");
-        card.className = "bfb-home-review-card";
-        const link = document.createElement("a");
-        link.href = "https://www.bilibili.com/video/" + info.bvid + "/";
-        if (cover) {
-          const img = document.createElement("img");
-          img.alt = "";
-          img.src = cover;
-          link.append(img);
+      for (const [bvid, entry] of entries2) {
+        const slot = entry.slots.find(({ parent: parent2 }) => parent2.isConnected);
+        if (!slot) {
+          entry.restored?.remove();
+          entries2.delete(bvid);
+          continue;
         }
-        const title = document.createElement("strong");
-        title.textContent = info.title || info.bvid;
-        link.append(title);
-        const author = document.createElement("span");
-        author.textContent = info.up;
-        card.append(link, author);
-        mark(card, reason, info);
-        list.append(card);
-      }
-      section.replaceChildren(heading, list);
-      if (!section.isConnected) {
-        const grid = document.querySelector(HOME_RECOMMEND_CONTAINER);
-        if (grid) grid.before(section);
-        else document.body?.prepend(section);
+        const reason = matchRule(entry.info);
+        const originalBack = entry.slots[0].original.isConnected && entry.slots[0].original.querySelector(videoLink(bvid));
+        if (!reason || originalBack) {
+          entry.restored?.remove();
+          entry.restored = void 0;
+          continue;
+        }
+        if (entry.restored?.isConnected) continue;
+        const restored = slot.template.cloneNode(true);
+        const card = slot === entry.slots[0] ? restored : restored.querySelector(".bili-video-card");
+        if (!card) continue;
+        for (const el of [restored, ...restored.querySelectorAll("[id], [data-bfb-done], [data-bfb-blocked], .bfb-review")]) {
+          el.removeAttribute("id");
+          el.removeAttribute(PROCESSED);
+          el.removeAttribute(ATTR_BLOCKED);
+          el.removeAttribute(ATTR_API);
+          el.classList.remove("bfb-review");
+        }
+        restored.querySelectorAll(".bfb-tag").forEach((el) => el.remove());
+        card.setAttribute(PROCESSED, "1");
+        restoredCards.add(card);
+        mark(card, reason, entry.info);
+        const { parent, next, previous, index } = slot;
+        const anchor = next?.parentElement === parent ? next : previous?.parentElement === parent ? previous.nextElementSibling : parent.children[index] || null;
+        parent.insertBefore(restored, anchor);
+        entry.restored = restored;
       }
     });
   }
@@ -4160,6 +4171,7 @@
     if (CONFIG.reviewMode) {
       markCard(card, reason, info);
     } else {
+      rememberHomeReviewCard(card, info);
       const cell = cellOf(card);
       if (!isUnsafeHideTarget(cell)) hideEl(cell);
       hideEl(card);
@@ -4172,7 +4184,7 @@
     recordBlock(reason, info, "DOM");
   }
   var processCard = safe("processCard", function(card, fresh = false) {
-    if (!CONFIG.enabled) return;
+    if (!CONFIG.enabled || isRestoredHomeReviewCard(card)) return;
     if (isInitialStatePending(card)) return;
     let info = extractCardInfo(card, M.needUid);
     if (!info.title && !info.up && !info.isLive) {
@@ -4225,6 +4237,7 @@
     };
     const known = dataVerdict(info.bvid, info.title, info.uid) || immediateVerdict(info);
     if (known) {
+      if (displayed && known.reason && !CONFIG.reviewMode) rememberHomeReviewCard(card, info);
       if (!displayed && !CONFIG.reviewMode) waitForVerdict(card);
       queueVerdict(Promise.resolve(known), apply, info);
       return;
@@ -5202,12 +5215,6 @@
 
   // src/ui/panel.styles.ts
   GM_addStyle(`
-    #bfb-home-review{margin:0 auto 20px;padding:12px 16px;max-width:1400px;color:var(--text1,inherit)}
-    #bfb-home-review h2{margin:0 0 12px;font-size:16px}
-    .bfb-home-review-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,220px),1fr));gap:12px}
-    .bfb-home-review-card{padding:35px 10px 10px;border-radius:8px}
-    .bfb-home-review-card a,.bfb-home-review-card span{display:block;overflow-wrap:anywhere}
-    .bfb-home-review-card img{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:5px;margin-bottom:6px}
     .bfb-gutter-fix > *{margin-right:0 !important}
     .bfb-review{outline:2px solid #fb7299 !important;outline-offset:-2px;border-radius:8px;position:relative !important}
     .bfb-tag{position:absolute;top:6px;left:6px;z-index:9;display:flex;align-items:center;gap:6px;background:rgba(251,114,153,.95);color:#fff;border-radius:8px;padding:3px 6px;font-size:11px;font-family:system-ui,Arial;box-shadow:0 2px 6px rgba(0,0,0,.25)}
@@ -6659,8 +6666,8 @@
     if (!p?.separate) return { url: normalizeWebDavRepositoryUrl(settings.url), username: settings.username, password: settings.password };
     return { url: normalizeWebDavRepositoryUrl(p.url), username: p.username, password: p.password };
   }
-  async function piliPlusFilesIn(settings, entries2) {
-    const folders = entries2.filter((x) => x.collection && x.name.toLowerCase() === "piliplus" && repositoryRelativePath(settings.url, x.url)?.length === 1);
+  async function piliPlusFilesIn(settings, entries3) {
+    const folders = entries3.filter((x) => x.collection && x.name.toLowerCase() === "piliplus" && repositoryRelativePath(settings.url, x.url)?.length === 1);
     const lists = await Promise.all(folders.map((x) => listWebDavDirectory(settings, x.url)));
     return lists.flat().filter((x) => !x.collection && /^piliplus_settings_(phone|pad|desktop)\.json$/i.test(x.name)).map((x) => ({ url: x.url, name: x.name, device: x.name.match(/_(phone|pad|desktop)\.json$/i)[1].toLowerCase() })).sort((a, b) => a.name.localeCompare(b.name));
   }
@@ -6681,8 +6688,8 @@
   async function testWebDavConnection(settings) {
     const root = normalizeWebDavRepositoryUrl(settings.url);
     await requestWebDavAccess(settings);
-    const entries2 = await listWebDavDirectory(settings, root);
-    const folder = entries2.find((x) => x.url === webDavBackupDirectory(settings) && x.collection);
+    const entries3 = await listWebDavDirectory(settings, root);
+    const folder = entries3.find((x) => x.url === webDavBackupDirectory(settings) && x.collection);
     const backupExists = !!folder && (await listWebDavDirectory(settings, folder.url)).some((x) => x.url === webDavBackupUrl(settings) && !x.collection);
     return { backupExists, piliPlusFiles: [] };
   }
@@ -6781,7 +6788,7 @@
     if (added || namesChanged) saveConfig();
     return { remoteCount: Object.keys(remote).length, added, localCount: CONFIG.block.uids.length };
   }
-  function appendPiliPlusUsers(raw, doc, entries2, originalMap = "") {
+  function appendPiliPlusUsers(raw, doc, entries3, originalMap = "") {
     const cacheKey = cacheKeyOf(doc);
     const span = jsonPropertySpan(raw, [cacheKey, "recommendBlockedMids"]);
     const cacheSpan = jsonPropertySpan(raw, [cacheKey]);
@@ -6790,10 +6797,10 @@
     const lineStart = raw.lastIndexOf("\n", at) + 1;
     const indent = (raw.slice(lineStart).match(/^\s*/) || [""])[0] + (span ? "" : "    ");
     const childIndent = indent + "    ";
-    const addedJson = entries2.map(([uid, name]) => `${childIndent}${JSON.stringify(uid)}: ${JSON.stringify(name)}`).join(",\n");
+    const addedJson = entries3.map(([uid, name]) => `${childIndent}${JSON.stringify(uid)}: ${JSON.stringify(name)}`).join(",\n");
     const mapJson = originalMap ? originalMap.slice(0, -1).trimEnd() + (Object.keys(JSON.parse(originalMap)).length ? "," : "") + `
 ${addedJson}
-${indent}}` : entries2.length ? `{
+${indent}}` : entries3.length ? `{
 ${addedJson}
 ${indent}}` : "{}";
     if (span) return raw.slice(0, span.start) + mapJson + raw.slice(span.end);
